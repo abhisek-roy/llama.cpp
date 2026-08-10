@@ -199,6 +199,8 @@ flowchart TD
 
 A first private-fork version should not try to solve all placement. It can start with an RPC penalty or speed weight that biases fewer layers to `RPC0` while still fitting memory. Telemetry should come first so the penalty can be based on observed cost instead of guesswork.
 
+The initial private-fork switch is `LLAMA_RPC_SPLIT_SCALE`. It is disabled by default. When unset, automatic split behavior uses reported free memory exactly as before. When set to a positive value, RPC devices count as `reported_free_memory * LLAMA_RPC_SPLIT_SCALE` for automatic placement. Values below `1.0` penalize RPC devices; for example `0.5` treats the MacBook RPC device as if it had half of its reported free memory. Explicit `--tensor-split` values are not changed by this switch.
+
 ## Future Async And Round-Trip Work
 
 ```mermaid
@@ -269,3 +271,13 @@ Expected interpretation:
 - `none`: should remove client-side cache probes and writes, but warm model load can become slower.
 
 Record prompt processing speed, token generation speed, RPC cache log lines, and whether this is the first or second run after the server cache is warm.
+
+After that, test automatic placement with `LLAMA_RPC_SPLIT_SCALE`:
+
+```text
+LLAMA_RPC_SPLIT_SCALE=0.75
+LLAMA_RPC_SPLIT_SCALE=0.50
+LLAMA_RPC_SPLIT_SCALE=0.25
+```
+
+Run without explicit `--tensor-split` for this experiment. Compare the chosen layer placement against the manual `--tensor-split 7,3,6` baseline.

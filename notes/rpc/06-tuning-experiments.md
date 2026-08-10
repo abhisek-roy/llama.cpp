@@ -167,6 +167,27 @@ Compare:
 - RPC graph server `compute_ms`
 - cache `hash_hit`, `hash_miss`, `skipped_scope`, and `cache_write`
 
+## Experiment 9: RPC Split Scale
+
+Goal: test automatic placement with an RPC penalty while keeping the feature disabled by default.
+
+Do not pass `--tensor-split` in this experiment. Start from the same device order:
+
+```text
+--rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0
+```
+
+Then compare:
+
+```text
+LLAMA_RPC_SPLIT_SCALE unset
+LLAMA_RPC_SPLIT_SCALE=0.75
+LLAMA_RPC_SPLIT_SCALE=0.50
+LLAMA_RPC_SPLIT_SCALE=0.25
+```
+
+Use `GGML_RPC_TELEMETRY=1` and `GGML_RPC_CACHE_SCOPE=weights` during these runs. Compare the layer placement logs, PP/TG speed, and `rpc_telemetry:` split lines against the manual `--tensor-split 7,3,6` baseline.
+
 ## Experiment Log Template
 
 ```text

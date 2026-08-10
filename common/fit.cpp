@@ -6,6 +6,8 @@
 
 #include <array>
 #include <cassert>
+#include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <cinttypes>
 #include <set>
@@ -25,6 +27,27 @@ enum common_layer_fraction_t {
 class common_params_fit_exception : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+static bool common_dev_is_rpc(ggml_backend_dev_t dev) {
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    return reg && std::string(ggml_backend_reg_name(reg)) == "RPC";
+}
+
+static float common_rpc_split_scale() {
+    const char * value = getenv("LLAMA_RPC_SPLIT_SCALE");
+    if (value == nullptr || value[0] == '\0') {
+        return 1.0f;
+    }
+
+    char * end = nullptr;
+    const float scale = strtof(value, &end);
+    if (end == value || !std::isfinite(scale) || scale <= 0.0f) {
+        LOG_WRN("%s: ignoring invalid LLAMA_RPC_SPLIT_SCALE='%s'\n", __func__, value);
+        return 1.0f;
+    }
+
+    return scale;
+}
 
 static std::vector<llama_device_memory_data> common_get_device_memory_data_impl(
         const char * path_model,
@@ -558,8 +581,16 @@ static void common_params_fit_impl(
 
     std::vector<int64_t> targets; // maximum acceptable memory use per device
     targets.reserve(nd);
+    const float rpc_split_scale = common_rpc_split_scale();
     for (size_t id = 0; id < nd; id++) {
-        targets.push_back(dmds_full[id].free - margins[id]);
+        int64_t free_target = dmds_full[id].free;
+        if (rpc_split_scale != 1.0f && common_dev_is_rpc(devs[id])) {
+            const int64_t free_target_orig = free_target;
+            free_target = int64_t(double(free_target) * double(rpc_split_scale));
+            LOG_TRC("%s: LLAMA_RPC_SPLIT_SCALE=%g changes %s fit target memory from %" PRId64 " MiB to %" PRId64 " MiB\n",
+                    __func__, double(rpc_split_scale), dev_names[id].c_str(), free_target_orig/MiB, free_target/MiB);
+        }
+        targets.push_back(free_target - margins[id]);
         LOG_TRC("%s: id=%zu, target=%" PRId64 " MiB\n", __func__, id, targets[id]/MiB);
     }
 

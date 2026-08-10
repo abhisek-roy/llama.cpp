@@ -87,21 +87,26 @@ Verification:
 
 ## Task 4: RPC-Aware Placement Scoring
 
+Status: implemented in the current working tree.
+
 Files:
 
 - `src/llama-model.cpp`
 - `common/fit.cpp`
+- `notes/rpc/06-tuning-experiments.md`
 - `notes/rpc/09-performance-system-design.md`
+- `notes/rpc/10-implementation-plan.md`
 
 Behavior:
 
-- Add a private-fork scoring knob only after telemetry data exists.
-- Start with a simple RPC penalty or speed weight.
+- Add `LLAMA_RPC_SPLIT_SCALE`.
 - Preserve default placement when the knob is unset.
+- Scale RPC reported free memory only for automatic placement.
+- Leave explicit `--tensor-split` unchanged.
 
 Verification:
 
-- Compare automatic placement with and without the new scoring knob.
+- Compare automatic placement with and without `LLAMA_RPC_SPLIT_SCALE`.
 - Confirm the model still fits.
 - Compare PP and TG against the manual `--tensor-split` baseline.
 
