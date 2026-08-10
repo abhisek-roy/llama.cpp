@@ -225,6 +225,34 @@ gh pr comment
 gh issue create
 ```
 
+## Private Fork Workflow
+
+This section is for the user's private fork and local work. The agent will usually be the one applying this workflow.
+
+- `upstream` is the official `ggml-org/llama.cpp` repo. Fetch and merge from it.
+- `origin` is the personal fork. Push only to it.
+- Keep the upstream push URL disabled.
+- Use `master` as the personal integration branch for this fork.
+- Use task-specific topic branches. Do not hardcode local branch names in instructions.
+- Update from upstream with merge, not a fast-forward-only workflow:
+
+```sh
+git fetch upstream
+git switch master
+git merge upstream/master
+```
+
+- Carry changes between personal branches with normal merges:
+
+```sh
+git switch <topic-branch>
+git merge master
+git switch master
+git merge <topic-branch>
+```
+
+- For upstream contribution work, create a fresh branch from `upstream/master` and keep private fork-only changes out of it.
+
 ## Useful Resources
 
 To conserve context space, load these resources as needed:
