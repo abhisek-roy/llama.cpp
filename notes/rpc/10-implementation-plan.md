@@ -112,21 +112,35 @@ Verification:
 
 ## Task 5: Output Placement Controls
 
+Status: implemented in the current working tree as a minimal private-fork experiment.
+
 Files:
 
 - `src/llama-model.cpp`
-- `src/llama-context.cpp`
 - `notes/rpc/09-performance-system-design.md`
+- `notes/rpc/10-implementation-plan.md`
 
 Behavior:
 
-- Explore a local-output preference without reordering all layer ranges.
-- Do this only after telemetry shows output placement is a material cost.
+- Add `LLAMA_OUTPUT_LAYER_DEVICE`.
+- Preserve default output placement when the env var is unset or empty.
+- Match the env var against selected offload device names from `--device`.
+- Override only the synthetic output layer placement, which covers final norm plus the output LM head.
+- Do not move the last transformer block, repeating layer split, KV placement, tensor split math, `n_gpu_layers`, or CLI arguments.
+- Fail fast when the env var names an unknown selected offload device.
+
+Launch example:
+
+```text
+LLAMA_OUTPUT_LAYER_DEVICE=CUDA0 --rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 7,3,6
+```
 
 Verification:
 
-- Compare output backend placement in logs.
+- Compare output backend placement in logs with and without `LLAMA_OUTPUT_LAYER_DEVICE=CUDA0`.
+- Confirm repeating layer assignment remains unchanged for `--tensor-split 7,3,6`.
 - Compare TG speed and boundary-copy bytes.
+- Confirm an unknown env value exits with a message listing the selected offload devices.
 
 ## Task 6: Async RPC Prototype
 

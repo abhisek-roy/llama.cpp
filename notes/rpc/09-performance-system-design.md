@@ -201,6 +201,26 @@ A first private-fork version should not try to solve all placement. It can start
 
 The initial private-fork switch is `LLAMA_RPC_SPLIT_SCALE`. It is disabled by default. When unset, automatic split behavior uses reported free memory exactly as before. When set to a positive value, RPC devices count as `reported_free_memory * LLAMA_RPC_SPLIT_SCALE` for automatic placement. Values below `1.0` penalize RPC devices; for example `0.5` treats the MacBook RPC device as if it had half of its reported free memory. Explicit `--tensor-split` values are not changed by this switch.
 
+## Output Layer Device Override
+
+The private-fork output placement switch is `LLAMA_OUTPUT_LAYER_DEVICE`. It is disabled when unset or empty. When set, it must match one selected offload device name from `--device`, for example `CUDA0`. Unknown names fail fast and list the selected offload devices.
+
+This is output-only placement: final norm plus output LM head. It does not move the last transformer block, the repeating layer split, KV placement, tensor split math, `n_gpu_layers`, or CLI arguments. The default output assignment still uses the synthetic layer after the repeating layers; the override only replaces the output buffer-type list with the matched device's existing list.
+
+Use it with the existing manual split experiment:
+
+```text
+LLAMA_OUTPUT_LAYER_DEVICE=CUDA0 --rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 7,3,6
+```
+
+Expected verification:
+
+- Logs show the default output device and then `LLAMA_OUTPUT_LAYER_DEVICE=CUDA0 sets output layer device = CUDA0`.
+- Repeating layer assignment remains unchanged for the same `--tensor-split 7,3,6`.
+- TG speed and telemetry boundary-copy bytes can be compared against the same launch without the env var.
+
+Risk: moving output weights to `CUDA0` increases local GPU memory use. It can also add a boundary copy from the device that owns the last repeating layer to `CUDA0`; the experiment is useful only if avoiding RPC output placement is worth that cost.
+
 ## Future Async And Round-Trip Work
 
 ```mermaid

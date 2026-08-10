@@ -1376,6 +1376,33 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
+    LLAMA_LOG_INFO("%s: output layer default device = %s\n", __func__, ggml_backend_dev_name(pimpl->dev_output.dev));
+
+    const char * output_layer_device = getenv("LLAMA_OUTPUT_LAYER_DEVICE");
+    if (output_layer_device != nullptr && output_layer_device[0] != '\0') {
+        std::ostringstream available;
+        bool first = true;
+        ggml_backend_dev_t override_dev = nullptr;
+        for (const auto & dev : devices) {
+            const char * dev_name = ggml_backend_dev_name(dev.dev);
+            if (!first) {
+                available << ", ";
+            }
+            first = false;
+            available << dev_name;
+            if (strcmp(output_layer_device, dev_name) == 0) {
+                override_dev = dev.dev;
+            }
+        }
+
+        if (override_dev == nullptr) {
+            const std::string available_str = first ? "none" : available.str();
+            throw std::runtime_error(format("%s: LLAMA_OUTPUT_LAYER_DEVICE='%s' does not match selected offload devices: %s", __func__, output_layer_device, available_str.c_str()));
+        }
+
+        pimpl->dev_output = { override_dev, &pimpl->gpu_buft_list.at(override_dev) };
+        LLAMA_LOG_INFO("%s: LLAMA_OUTPUT_LAYER_DEVICE=%s sets output layer device = %s\n", __func__, output_layer_device, ggml_backend_dev_name(pimpl->dev_output.dev));
+    }
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
