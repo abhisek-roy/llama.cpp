@@ -13,6 +13,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -20,8 +21,40 @@
 
 static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
 
+static bool get_rpc_telemetry() {
+    const char * value = std::getenv("GGML_RPC_TELEMETRY");
+    return value != nullptr && std::atoi(value) > 0;
+}
+
+static const bool RPC_TELEMETRY = get_rpc_telemetry();
+
 #define LOG_DBG(...) \
     do { if (RPC_DEBUG) GGML_LOG_DEBUG(__VA_ARGS__); } while (0)
+
+#define LOG_RPC_TELEMETRY(...) \
+    do { if (RPC_TELEMETRY) GGML_LOG_INFO(__VA_ARGS__); } while (0)
+
+enum rpc_cache_scope {
+    RPC_CACHE_SCOPE_ALL,
+    RPC_CACHE_SCOPE_WEIGHTS,
+    RPC_CACHE_SCOPE_NONE,
+};
+
+static rpc_cache_scope get_rpc_cache_scope() {
+    const char * scope = std::getenv("GGML_RPC_CACHE_SCOPE");
+    if (scope == nullptr || strcmp(scope, "all") == 0) {
+        return RPC_CACHE_SCOPE_ALL;
+    }
+    if (strcmp(scope, "weights") == 0) {
+        return RPC_CACHE_SCOPE_WEIGHTS;
+    }
+    if (strcmp(scope, "none") == 0) {
+        return RPC_CACHE_SCOPE_NONE;
+    }
+    return RPC_CACHE_SCOPE_ALL;
+}
+
+static const rpc_cache_scope RPC_CACHE_SCOPE = get_rpc_cache_scope();
 
 
 namespace fs = std::filesystem;
@@ -247,6 +280,30 @@ static uint64_t fnv_hash(const uint8_t * data, size_t len) {
         hash *= fnv_prime;
     }
     return hash;
+}
+
+static bool ggml_backend_rpc_buffer_use_cache(ggml_backend_buffer_t buffer) {
+    switch (RPC_CACHE_SCOPE) {
+        case RPC_CACHE_SCOPE_ALL:
+            return true;
+        case RPC_CACHE_SCOPE_WEIGHTS:
+            return ggml_backend_buffer_get_usage(buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
+        case RPC_CACHE_SCOPE_NONE:
+            return false;
+    }
+    return true;
+}
+
+static const char * ggml_backend_buffer_usage_name(enum ggml_backend_buffer_usage usage) {
+    switch (usage) {
+        case GGML_BACKEND_BUFFER_USAGE_ANY:
+            return "any";
+        case GGML_BACKEND_BUFFER_USAGE_WEIGHTS:
+            return "weights";
+        case GGML_BACKEND_BUFFER_USAGE_COMPUTE:
+            return "compute";
+    }
+    return "unknown";
 }
 
 static bool send_msg(socket_ptr sock, const void * msg, size_t msg_size) {
@@ -486,27 +543,47 @@ static void ggml_backend_rpc_buffer_memset_tensor(
 static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
-    if (size > HASH_THRESHOLD) {
+    const bool large = size > HASH_THRESHOLD;
+    const bool cache_allowed = ggml_backend_rpc_buffer_use_cache(buffer);
+    const bool use_cache = large && cache_allowed;
+    const enum ggml_backend_buffer_usage usage = ggml_backend_buffer_get_usage(buffer);
+    if (RPC_TELEMETRY && large && !cache_allowed) {
+        LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=skipped_scope tensor=%s bytes=%zu usage=%s\n",
+                tensor->name, size, ggml_backend_buffer_usage_name(usage));
+    }
+    if (use_cache) {
         rpc_msg_set_tensor_hash_req request;
         request.tensor = rpc_tensor;
         request.offset = offset;
         request.hash = fnv_hash((const uint8_t*)data, size);
         rpc_msg_set_tensor_hash_rsp response;
+        const int64_t t_hash_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
         bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_HASH, &request, sizeof(request), &response, sizeof(response));
         RPC_STATUS_ASSERT(status);
+        const int64_t t_hash_us = RPC_TELEMETRY ? ggml_time_us() - t_hash_start_us : 0;
+        LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=%s tensor=%s bytes=%zu usage=%s hash=%016" PRIx64 " cmd_ms=%.3f\n",
+                response.result ? "hash_hit" : "hash_miss", tensor->name, size, ggml_backend_buffer_usage_name(usage), request.hash, t_hash_us/1000.0);
         if (response.result) {
             // the server has the same data, no need to send it
             return;
         }
     }
-    // input serialization format: | rpc_tensor | offset (8 bytes) | data (size bytes)
-    size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + size;
+    // input serialization format: | rpc_tensor | offset (8 bytes) | cache_write (1 byte) | data (size bytes)
+    const uint8_t cache_write = use_cache ? 1 : 0;
+    size_t input_size = sizeof(rpc_tensor) + sizeof(uint64_t) + sizeof(cache_write) + size;
     std::vector<uint8_t> input(input_size, 0);
     memcpy(input.data(), &rpc_tensor, sizeof(rpc_tensor));
     memcpy(input.data() + sizeof(rpc_tensor), &offset, sizeof(offset));
-    memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset), data, size);
+    memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset), &cache_write, sizeof(cache_write));
+    memcpy(input.data() + sizeof(rpc_tensor) + sizeof(offset) + sizeof(cache_write), data, size);
+    const int64_t t_set_start_us = RPC_TELEMETRY && large ? ggml_time_us() : 0;
     bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR, input.data(), input.size());
     RPC_STATUS_ASSERT(status);
+    if (RPC_TELEMETRY && large) {
+        const int64_t t_set_us = ggml_time_us() - t_set_start_us;
+        LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=set_tensor tensor=%s bytes=%zu usage=%s cache_write=%u cmd_ms=%.3f\n",
+                tensor->name, size, ggml_backend_buffer_usage_name(usage), (unsigned) cache_write, t_set_us/1000.0);
+    }
 }
 
 static void ggml_backend_rpc_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -690,7 +767,7 @@ static void add_tensor(ggml_tensor * tensor, std::vector<rpc_tensor> & tensors, 
     tensors.push_back(serialize_tensor(tensor));
 }
 
-static void serialize_graph(uint32_t device, const ggml_cgraph * cgraph, std::vector<uint8_t> & output) {
+static uint32_t serialize_graph(uint32_t device, const ggml_cgraph * cgraph, std::vector<uint8_t> & output) {
     uint32_t n_nodes = cgraph->n_nodes;
     std::vector<rpc_tensor> tensors;
     std::unordered_set<ggml_tensor*> visited;
@@ -715,6 +792,7 @@ static void serialize_graph(uint32_t device, const ggml_cgraph * cgraph, std::ve
     dest += sizeof(n_tensors);
     rpc_tensor * out_tensors = (rpc_tensor *)dest;
     memcpy(out_tensors, tensors.data(), n_tensors * sizeof(rpc_tensor));
+    return n_tensors;
 }
 
 static enum ggml_status ggml_backend_rpc_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
@@ -728,15 +806,25 @@ static enum ggml_status ggml_backend_rpc_graph_compute(ggml_backend_t backend, g
         rpc_msg_graph_recompute_req request;
         request.device = rpc_ctx->device;
         auto sock = get_socket(rpc_ctx->endpoint);
+        const int64_t t_cmd_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
         bool status = send_rpc_cmd(sock, RPC_CMD_GRAPH_RECOMPUTE, &request, sizeof(request));
         RPC_STATUS_ASSERT(status);
+        const int64_t t_cmd_us = RPC_TELEMETRY ? ggml_time_us() - t_cmd_start_us : 0;
+        LOG_RPC_TELEMETRY("rpc_telemetry: graph client backend=%s mode=recompute device=%u nodes=%d payload_bytes=%zu cmd_ms=%.3f\n",
+                ggml_backend_name(backend), rpc_ctx->device, cgraph->n_nodes, sizeof(request), t_cmd_us/1000.0);
     } else {
         rpc_dev_ctx->last_graph_uid = cgraph->uid;
         std::vector<uint8_t> input;
-        serialize_graph(rpc_ctx->device, cgraph, input);
+        const int64_t t_serialize_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
+        const uint32_t n_tensors = serialize_graph(rpc_ctx->device, cgraph, input);
+        const int64_t t_serialize_us = RPC_TELEMETRY ? ggml_time_us() - t_serialize_start_us : 0;
         auto sock = get_socket(rpc_ctx->endpoint);
+        const int64_t t_cmd_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
         bool status = send_rpc_cmd(sock, RPC_CMD_GRAPH_COMPUTE, input.data(), input.size());
         RPC_STATUS_ASSERT(status);
+        const int64_t t_cmd_us = RPC_TELEMETRY ? ggml_time_us() - t_cmd_start_us : 0;
+        LOG_RPC_TELEMETRY("rpc_telemetry: graph client backend=%s mode=full device=%u nodes=%d tensors=%u payload_bytes=%zu serialize_ms=%.3f cmd_ms=%.3f\n",
+                ggml_backend_name(backend), rpc_ctx->device, cgraph->n_nodes, n_tensors, input.size(), t_serialize_us/1000.0, t_cmd_us/1000.0);
     }
     return GGML_STATUS_SUCCESS;
 }
@@ -1108,14 +1196,17 @@ ggml_tensor * rpc_server::deserialize_tensor(struct ggml_context * ctx, const rp
 
 
 bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
-    // serialization format: | rpc_tensor | offset (8 bytes) | data (size bytes) |
-    if (input.size() < sizeof(rpc_tensor) + sizeof(uint64_t)) {
+    // serialization format: | rpc_tensor | offset (8 bytes) | cache_write (1 byte) | data (size bytes) |
+    if (input.size() < sizeof(rpc_tensor) + sizeof(uint64_t) + sizeof(uint8_t)) {
         return false;
     }
     const rpc_tensor * in_tensor = (const rpc_tensor *)input.data();
     uint64_t offset;
     memcpy(&offset, input.data() + sizeof(rpc_tensor), sizeof(offset));
-    const size_t size = input.size() - sizeof(rpc_tensor) - sizeof(offset);
+    uint8_t cache_write;
+    memcpy(&cache_write, input.data() + sizeof(rpc_tensor) + sizeof(offset), sizeof(cache_write));
+    const size_t data_offset = sizeof(rpc_tensor) + sizeof(offset) + sizeof(cache_write);
+    const size_t size = input.size() - data_offset;
 
     struct ggml_init_params params {
         /*.mem_size   =*/ ggml_tensor_overhead(),
@@ -1130,7 +1221,7 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
         return false;
     }
-    LOG_DBG("[%s] buffer: %p, data: %p, offset: %" PRIu64 ", size: %zu\n", __func__, (void*)tensor->buffer, tensor->data, offset, size);
+    LOG_DBG("[%s] buffer: %p, data: %p, offset: %" PRIu64 ", size: %zu, cache_write: %u\n", __func__, (void*)tensor->buffer, tensor->data, offset, size, (unsigned) cache_write);
 
     // sanitize tensor->data
     {
@@ -1144,8 +1235,9 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
         }
     }
 
-    const void * data = input.data() + sizeof(rpc_tensor) + sizeof(offset);
-    if (cache_dir && size > HASH_THRESHOLD) {
+    const void * data = input.data() + data_offset;
+    bool wrote_cache = false;
+    if (cache_write && cache_dir && size > HASH_THRESHOLD) {
         uint64_t hash = fnv_hash((const uint8_t*)data, size);
         char hash_str[17];
         snprintf(hash_str, sizeof(hash_str), "%016" PRIx64, hash);
@@ -1154,6 +1246,11 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
         std::ofstream ofs(cache_file, std::ios::binary);
         ofs.write((const char *)data, size);
         GGML_LOG_INFO("[%s] saved to '%s'\n", __func__, cache_file.string().c_str());
+        wrote_cache = true;
+    }
+    if (RPC_TELEMETRY && size > HASH_THRESHOLD) {
+        LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=set_tensor tensor=%s bytes=%zu cache_write=%u wrote_cache=%u\n",
+                tensor->name, size, (unsigned) cache_write, wrote_cache ? 1u : 0u);
     }
     ggml_backend_tensor_set(tensor, data, offset, size);
     return true;
@@ -1184,6 +1281,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
     std::vector<uint8_t> cached_file;
     if (!get_cached_file(request.hash, cached_file)) {
         response.result = 0;
+        LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=hash_miss hash=%016" PRIx64 "\n", request.hash);
         return true;
     }
     size_t size = cached_file.size();
@@ -1218,6 +1316,8 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
     }
     ggml_backend_tensor_set(tensor, cached_file.data(), request.offset, size);
     response.result = 1;
+    LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=hash_hit tensor=%s bytes=%zu hash=%016" PRIx64 "\n",
+            tensor->name, size, request.hash);
     return true;
 }
 
@@ -1452,7 +1552,11 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
             return false;
         }
     }
+    const int64_t t_compute_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
+    const int64_t t_compute_us = RPC_TELEMETRY ? ggml_time_us() - t_compute_start_us : 0;
+    LOG_RPC_TELEMETRY("rpc_telemetry: graph server mode=full device=%u backend=%s nodes=%u tensors=%u compute_ms=%.3f status=%d\n",
+            device, ggml_backend_name(backends[device]), n_nodes, n_tensors, t_compute_us/1000.0, status);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     stored_graphs[device].graph = graph;
     return true;
@@ -1468,7 +1572,11 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
     }
     ggml_cgraph * graph = stored_graphs[device].graph;
     LOG_DBG("[%s] device: %u\n", __func__, device);
+    const int64_t t_compute_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
+    const int64_t t_compute_us = RPC_TELEMETRY ? ggml_time_us() - t_compute_start_us : 0;
+    LOG_RPC_TELEMETRY("rpc_telemetry: graph server mode=recompute device=%u backend=%s nodes=%d compute_ms=%.3f status=%d\n",
+            device, ggml_backend_name(backends[device]), graph->n_nodes, t_compute_us/1000.0, status);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     return true;
 }

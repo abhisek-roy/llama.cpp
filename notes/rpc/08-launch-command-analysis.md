@@ -504,4 +504,11 @@ The useful startup lines are the ones that show:
 - `n_ctx`, `n_ctx_seq`, `n_seq_max`, and `kv_unified`
 - whether pipeline parallelism is enabled or disabled
 
+With `GGML_RPC_TELEMETRY=1`, also watch `rpc_telemetry:` lines:
+
+- `sched`: backend split count, copied bytes, copy time, and compute time
+- `graph client`: full graph send vs graph recompute and RPC command time
+- `graph server`: remote backend compute time
+- `cache`: hash hit or miss, skipped scope, and cache write intent
+
 For RPC specifically, pipeline parallelism should be expected to stay disabled because the RPC device reports no async compute or events. Therefore the highest-value tuning is placement: fewer RPC layers, RPC at the start of the stack, and output on local CUDA.

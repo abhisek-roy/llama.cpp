@@ -22,6 +22,8 @@ Read in order:
 6. [Tuning experiments](06-tuning-experiments.md)
 7. [Code map](07-code-map.md)
 8. [Launch command analysis](08-launch-command-analysis.md)
+9. [RPC performance system design](09-performance-system-design.md)
+10. [RPC performance implementation plan](10-implementation-plan.md)
 
 Core idea:
 

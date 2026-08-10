@@ -13,7 +13,7 @@ RPC traffic falls into four broad groups.
 | Inference | Serialized graph metadata, cross-backend activations, graph recompute commands. |
 | Output | Tensors read back when the main process needs logits, embeddings, or sampled token data. |
 
-Large tensor transfer uses a hash check first when the data is larger than 10 MiB. If the remote server cache is enabled and already has that hash, the full tensor bytes do not need to be sent again.
+Large tensor transfer can use a hash check first when the data is larger than 10 MiB. If the remote server cache is enabled and already has that hash, the full tensor bytes do not need to be sent again.
 
 ```mermaid
 sequenceDiagram
@@ -22,18 +22,26 @@ sequenceDiagram
     participant Server as RPC server
     participant Cache as Server cache
 
-    Main->>RPC: set large tensor
+    Main->>RPC: set cacheable large tensor
     RPC->>Server: RPC_CMD_SET_TENSOR_HASH
     Server->>Cache: lookup hash
     alt cache hit
         Server-->>RPC: already available
     else cache miss
-        RPC->>Server: RPC_CMD_SET_TENSOR with bytes
-        Server->>Cache: save tensor bytes
+        RPC->>Server: RPC_CMD_SET_TENSOR with bytes and cache_write flag
+        Server->>Cache: save tensor bytes if cache_write is set
     end
 ```
 
-Use `ggml-rpc-server --cache` on the remote host to enable this.
+Use `ggml-rpc-server --cache` on the remote host to give the server a cache directory. The client-side `GGML_RPC_CACHE_SCOPE` setting decides which uploads should use that cache protocol:
+
+- `all`: default behavior. Hash and cache any large tensor upload.
+- `weights`: hash and cache only buffers marked `GGML_BACKEND_BUFFER_USAGE_WEIGHTS`.
+- `none`: do not use the RPC cache protocol from the client.
+
+`--cache` and `GGML_RPC_CACHE_SCOPE` are separate controls. `--cache` says the server can read and write cached tensor files. `GGML_RPC_CACHE_SCOPE` says which client uploads are worth checking and saving. For the Qwen3.6 RPC investigation, use `GGML_RPC_CACHE_SCOPE=weights` with `ggml-rpc-server --cache` first: it keeps warm weight loads but avoids cache writes for transient prompt-processing tensors.
+
+On a cache miss, the client still sends `RPC_CMD_SET_TENSOR` with the tensor bytes. The server writes a cache file only when the `cache_write` flag is set, but it always calls `ggml_backend_tensor_set()` with the payload data.
 
 ## Boundary Copies
 

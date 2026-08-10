@@ -27,6 +27,11 @@
 #include <sys/sysctl.h>
 #endif
 
+static bool ggml_rpc_telemetry_enabled(void) {
+    const char * value = getenv("GGML_RPC_TELEMETRY");
+    return value != NULL && atoi(value) > 0;
+}
+
 
 // backend buffer type
 
@@ -1594,6 +1599,7 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
+    const bool rpc_telemetry = ggml_rpc_telemetry_enabled();
 
     ggml_tensor * prev_ids_tensor = nullptr;
     std::vector<int32_t> ids;
@@ -1605,10 +1611,13 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
         // copy the input tensors to the split backend
+        size_t copy_bytes = 0;
+        const int64_t t_copy_start_us = rpc_telemetry ? ggml_time_us() : 0;
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
             struct ggml_tensor * input = split->inputs[input_id];
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+            copy_bytes += ggml_nbytes(input);
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
@@ -1726,10 +1735,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 }
             }
         }
+        const int64_t t_copy_us = rpc_telemetry ? ggml_time_us() - t_copy_start_us : 0;
 
+        const int64_t t_compute_start_us = rpc_telemetry ? ggml_time_us() : 0;
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
+                if (rpc_telemetry) {
+                    const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+                    GGML_LOG_INFO("rpc_telemetry: sched split=%d/%d backend=%s nodes=%d inputs=%d copy_bytes=%zu copy_ms=%.3f compute_ms=%.3f status=%d\n",
+                            split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us/1000.0, t_compute_us/1000.0, ec);
+                }
                 return ec;
             }
         } else {
@@ -1752,6 +1768,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv);
                 if (ec != GGML_STATUS_SUCCESS) {
+                    if (rpc_telemetry) {
+                        const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+                        GGML_LOG_INFO("rpc_telemetry: sched split=%d/%d backend=%s nodes=%d inputs=%d copy_bytes=%zu copy_ms=%.3f compute_ms=%.3f status=%d\n",
+                                split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us/1000.0, t_compute_us/1000.0, ec);
+                    }
                     return ec;
                 }
 
@@ -1764,6 +1785,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 j0 = j1;
             }
+        }
+        if (rpc_telemetry) {
+            const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+            GGML_LOG_INFO("rpc_telemetry: sched split=%d/%d backend=%s nodes=%d inputs=%d copy_bytes=%zu copy_ms=%.3f compute_ms=%.3f status=%d\n",
+                    split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us/1000.0, t_compute_us/1000.0, GGML_STATUS_SUCCESS);
         }
 
         // record the event of this copy

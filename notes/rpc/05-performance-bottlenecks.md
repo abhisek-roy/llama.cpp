@@ -107,6 +107,8 @@ Likely impact: high for repeated load time, low for steady-state tokens/s.
 
 This avoids resending large tensors that the MacBook already cached. It mainly improves startup and iteration time, not token generation speed after the model is loaded.
 
+With the private-fork cache scope patch, prefer `GGML_RPC_CACHE_SCOPE=weights` when the server uses `--cache`. This preserves cached weight loads while stopping large transient inference tensors from doing cache hash checks and cache file writes. Use `GGML_RPC_CACHE_SCOPE=none` only as a diagnostic, or when the server is not using `--cache` and client-side hash probes are wasted.
+
 ### 6. Test KV Offload
 
 Likely impact: medium, workload-dependent.

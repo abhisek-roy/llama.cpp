@@ -97,7 +97,7 @@ Keep the same model command and `--tensor-split` while changing only the network
 
 ## Experiment 6: RPC Cache
 
-Goal: reduce repeated model-load time.
+Goal: reduce repeated model-load time without adding cache writes for transient inference tensors.
 
 On the MacBook:
 
@@ -105,7 +105,17 @@ On the MacBook:
 ggml-rpc-server --cache --host <trusted-host> --port 50052
 ```
 
-Then run the same model twice. The second load should avoid sending already cached large tensors.
+Then run the same model twice. The second load should avoid sending already cached large weight tensors.
+
+On the client, compare:
+
+```text
+GGML_RPC_CACHE_SCOPE=all
+GGML_RPC_CACHE_SCOPE=weights
+GGML_RPC_CACHE_SCOPE=none
+```
+
+Use `weights` as the first setting for normal testing with `--cache`. Use `none` as a diagnostic or when the server does not use `--cache`.
 
 ## Experiment 7: KV Offload Check
 
@@ -118,6 +128,44 @@ Run once with default KV offload, then once with:
 ```
 
 Expected: for RPC layer placement, KV offload should usually be better because KV follows the layer device. If disabling it improves performance, that is a strong clue that remote KV traffic or backend scheduling needs deeper inspection.
+
+## Experiment 8: RPC Telemetry
+
+Goal: measure where RPC time is going before changing placement logic.
+
+Run the RPC server and client with:
+
+```text
+GGML_RPC_TELEMETRY=1
+```
+
+Start with the useful current split:
+
+```text
+--rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 7,3,6
+```
+
+Run the same model and prompt with:
+
+```text
+GGML_RPC_CACHE_SCOPE=all
+GGML_RPC_CACHE_SCOPE=weights
+GGML_RPC_CACHE_SCOPE=none
+```
+
+In the logs, grep for:
+
+```text
+rpc_telemetry:
+```
+
+Compare:
+
+- scheduler split `backend`, `copy_bytes`, `copy_ms`, and `compute_ms`
+- RPC graph `mode=full` vs `mode=recompute`
+- RPC graph client `cmd_ms`
+- RPC graph server `compute_ms`
+- cache `hash_hit`, `hash_miss`, `skipped_scope`, and `cache_write`
 
 ## Experiment Log Template
 
@@ -134,5 +182,6 @@ Negotiated link speed:
 Context size:
 Prompt tokens/s:
 Generation tokens/s:
+Telemetry summary:
 Notes:
 ```
