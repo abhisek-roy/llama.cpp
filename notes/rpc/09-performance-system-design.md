@@ -176,6 +176,8 @@ Useful fields:
 
 The first telemetry version should be opt-in and log-only. It should not change scheduling behavior.
 
+`GGML_RPC_TELEMETRY=1` also keeps aggregate counters and prints `rpc_telemetry: summary ...` lines when the process exits normally. These summaries group scheduler split time by backend, RPC graph client time by backend and graph mode, RPC server compute time by backend and graph mode, and cache traffic by side, event, and usage. They are process totals, not per request totals. If the process is killed before normal shutdown, summarize the raw telemetry log with the bash commands in [Tuning experiments](06-tuning-experiments.md).
+
 ## Placement Scoring Design
 
 Current automatic split behavior is mostly memory based. For RPC, memory is not enough because a remote device has extra latency and network bandwidth cost.

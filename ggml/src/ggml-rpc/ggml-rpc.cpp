@@ -306,6 +306,238 @@ static const char * ggml_backend_buffer_usage_name(enum ggml_backend_buffer_usag
     return "unknown";
 }
 
+struct rpc_telemetry_graph_client_stats {
+    std::string backend;
+    std::string mode;
+    uint64_t calls = 0;
+    uint64_t nodes = 0;
+    uint64_t tensors = 0;
+    size_t payload_bytes = 0;
+    double serialize_ms = 0.0;
+    double cmd_ms = 0.0;
+    double max_cmd_ms = 0.0;
+};
+
+struct rpc_telemetry_graph_server_stats {
+    std::string backend;
+    std::string mode;
+    uint64_t calls = 0;
+    uint64_t nodes = 0;
+    uint64_t tensors = 0;
+    double compute_ms = 0.0;
+    double max_compute_ms = 0.0;
+    uint64_t errors = 0;
+};
+
+struct rpc_telemetry_cache_stats {
+    std::string side;
+    std::string event;
+    std::string usage;
+    uint64_t calls = 0;
+    size_t bytes = 0;
+    double cmd_ms = 0.0;
+    double max_cmd_ms = 0.0;
+    uint64_t cache_write = 0;
+    uint64_t wrote_cache = 0;
+};
+
+static std::mutex & rpc_telemetry_mutex() {
+    static std::mutex * mutex = new std::mutex;
+    return *mutex;
+}
+
+static std::unordered_map<std::string, rpc_telemetry_graph_client_stats> & rpc_telemetry_graph_client_map() {
+    static std::unordered_map<std::string, rpc_telemetry_graph_client_stats> * map = new std::unordered_map<std::string, rpc_telemetry_graph_client_stats>;
+    return *map;
+}
+
+static std::unordered_map<std::string, rpc_telemetry_graph_server_stats> & rpc_telemetry_graph_server_map() {
+    static std::unordered_map<std::string, rpc_telemetry_graph_server_stats> * map = new std::unordered_map<std::string, rpc_telemetry_graph_server_stats>;
+    return *map;
+}
+
+static std::unordered_map<std::string, rpc_telemetry_cache_stats> & rpc_telemetry_cache_map() {
+    static std::unordered_map<std::string, rpc_telemetry_cache_stats> * map = new std::unordered_map<std::string, rpc_telemetry_cache_stats>;
+    return *map;
+}
+
+static std::string rpc_telemetry_key(const char * a, const char * b) {
+    std::string key = a;
+    key.push_back('\n');
+    key += b;
+    return key;
+}
+
+static std::string rpc_telemetry_key(const char * a, const char * b, const char * c) {
+    std::string key = rpc_telemetry_key(a, b);
+    key.push_back('\n');
+    key += c;
+    return key;
+}
+
+static void rpc_telemetry_print_summary() {
+    std::lock_guard<std::mutex> lock(rpc_telemetry_mutex());
+
+    for (const auto & item : rpc_telemetry_graph_client_map()) {
+        const rpc_telemetry_graph_client_stats & stats = item.second;
+        if (stats.calls == 0) {
+            continue;
+        }
+
+        GGML_LOG_INFO(
+                "rpc_telemetry: summary graph_client backend=%s mode=%s calls=%llu nodes=%llu tensors=%llu payload_bytes=%zu serialize_ms=%.3f cmd_ms=%.3f avg_cmd_ms=%.3f max_cmd_ms=%.3f\n",
+                stats.backend.c_str(),
+                stats.mode.c_str(),
+                (unsigned long long) stats.calls,
+                (unsigned long long) stats.nodes,
+                (unsigned long long) stats.tensors,
+                stats.payload_bytes,
+                stats.serialize_ms,
+                stats.cmd_ms,
+                stats.cmd_ms / stats.calls,
+                stats.max_cmd_ms);
+    }
+
+    for (const auto & item : rpc_telemetry_graph_server_map()) {
+        const rpc_telemetry_graph_server_stats & stats = item.second;
+        if (stats.calls == 0) {
+            continue;
+        }
+
+        GGML_LOG_INFO(
+                "rpc_telemetry: summary graph_server backend=%s mode=%s calls=%llu nodes=%llu tensors=%llu compute_ms=%.3f avg_compute_ms=%.3f max_compute_ms=%.3f errors=%llu\n",
+                stats.backend.c_str(),
+                stats.mode.c_str(),
+                (unsigned long long) stats.calls,
+                (unsigned long long) stats.nodes,
+                (unsigned long long) stats.tensors,
+                stats.compute_ms,
+                stats.compute_ms / stats.calls,
+                stats.max_compute_ms,
+                (unsigned long long) stats.errors);
+    }
+
+    for (const auto & item : rpc_telemetry_cache_map()) {
+        const rpc_telemetry_cache_stats & stats = item.second;
+        if (stats.calls == 0) {
+            continue;
+        }
+
+        GGML_LOG_INFO(
+                "rpc_telemetry: summary cache side=%s event=%s usage=%s calls=%llu bytes=%zu cmd_ms=%.3f avg_cmd_ms=%.3f max_cmd_ms=%.3f cache_write=%llu wrote_cache=%llu\n",
+                stats.side.c_str(),
+                stats.event.c_str(),
+                stats.usage.c_str(),
+                (unsigned long long) stats.calls,
+                stats.bytes,
+                stats.cmd_ms,
+                stats.cmd_ms / stats.calls,
+                stats.max_cmd_ms,
+                (unsigned long long) stats.cache_write,
+                (unsigned long long) stats.wrote_cache);
+    }
+}
+
+static void rpc_telemetry_register_summary() {
+    static const bool registered = []() {
+        atexit(rpc_telemetry_print_summary);
+        return true;
+    }();
+    (void) registered;
+}
+
+static void rpc_telemetry_record_graph_client(
+        const char * backend,
+        const char * mode,
+        uint64_t nodes,
+        uint64_t tensors,
+        size_t payload_bytes,
+        int64_t serialize_us,
+        int64_t cmd_us) {
+    if (!RPC_TELEMETRY) {
+        return;
+    }
+    rpc_telemetry_register_summary();
+
+    const double serialize_ms = serialize_us/1000.0;
+    const double cmd_ms       = cmd_us/1000.0;
+
+    std::lock_guard<std::mutex> lock(rpc_telemetry_mutex());
+
+    rpc_telemetry_graph_client_stats & stats = rpc_telemetry_graph_client_map()[rpc_telemetry_key(backend, mode)];
+    if (stats.calls == 0) {
+        stats.backend = backend;
+        stats.mode    = mode;
+    }
+    stats.calls++;
+    stats.nodes         += nodes;
+    stats.tensors       += tensors;
+    stats.payload_bytes += payload_bytes;
+    stats.serialize_ms  += serialize_ms;
+    stats.cmd_ms        += cmd_ms;
+    stats.max_cmd_ms     = std::max(stats.max_cmd_ms, cmd_ms);
+}
+
+static void rpc_telemetry_record_graph_server(
+        const char * backend,
+        const char * mode,
+        uint64_t nodes,
+        uint64_t tensors,
+        int64_t compute_us,
+        enum ggml_status status) {
+    if (!RPC_TELEMETRY) {
+        return;
+    }
+    rpc_telemetry_register_summary();
+
+    const double compute_ms = compute_us/1000.0;
+
+    std::lock_guard<std::mutex> lock(rpc_telemetry_mutex());
+
+    rpc_telemetry_graph_server_stats & stats = rpc_telemetry_graph_server_map()[rpc_telemetry_key(backend, mode)];
+    if (stats.calls == 0) {
+        stats.backend = backend;
+        stats.mode    = mode;
+    }
+    stats.calls++;
+    stats.nodes          += nodes;
+    stats.tensors        += tensors;
+    stats.compute_ms     += compute_ms;
+    stats.max_compute_ms  = std::max(stats.max_compute_ms, compute_ms);
+    stats.errors         += status == GGML_STATUS_SUCCESS ? 0 : 1;
+}
+
+static void rpc_telemetry_record_cache(
+        const char * side,
+        const char * event,
+        const char * usage,
+        size_t bytes,
+        int64_t cmd_us,
+        uint8_t cache_write,
+        uint8_t wrote_cache) {
+    if (!RPC_TELEMETRY) {
+        return;
+    }
+    rpc_telemetry_register_summary();
+
+    const double cmd_ms = cmd_us/1000.0;
+
+    std::lock_guard<std::mutex> lock(rpc_telemetry_mutex());
+
+    rpc_telemetry_cache_stats & stats = rpc_telemetry_cache_map()[rpc_telemetry_key(side, event, usage)];
+    if (stats.calls == 0) {
+        stats.side  = side;
+        stats.event = event;
+        stats.usage = usage;
+    }
+    stats.calls++;
+    stats.bytes       += bytes;
+    stats.cmd_ms      += cmd_ms;
+    stats.max_cmd_ms   = std::max(stats.max_cmd_ms, cmd_ms);
+    stats.cache_write += cache_write != 0 ? 1 : 0;
+    stats.wrote_cache += wrote_cache != 0 ? 1 : 0;
+}
+
 static bool send_msg(socket_ptr sock, const void * msg, size_t msg_size) {
     if (!sock->send_data(&msg_size, sizeof(msg_size))) {
         return false;
@@ -550,6 +782,7 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
     if (RPC_TELEMETRY && large && !cache_allowed) {
         LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=skipped_scope tensor=%s bytes=%zu usage=%s\n",
                 tensor->name, size, ggml_backend_buffer_usage_name(usage));
+        rpc_telemetry_record_cache("client", "skipped_scope", ggml_backend_buffer_usage_name(usage), size, 0, 0, 0);
     }
     if (use_cache) {
         rpc_msg_set_tensor_hash_req request;
@@ -561,8 +794,10 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
         bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_HASH, &request, sizeof(request), &response, sizeof(response));
         RPC_STATUS_ASSERT(status);
         const int64_t t_hash_us = RPC_TELEMETRY ? ggml_time_us() - t_hash_start_us : 0;
+        const char * event = response.result ? "hash_hit" : "hash_miss";
         LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=%s tensor=%s bytes=%zu usage=%s hash=%016" PRIx64 " cmd_ms=%.3f\n",
-                response.result ? "hash_hit" : "hash_miss", tensor->name, size, ggml_backend_buffer_usage_name(usage), request.hash, t_hash_us/1000.0);
+                event, tensor->name, size, ggml_backend_buffer_usage_name(usage), request.hash, t_hash_us/1000.0);
+        rpc_telemetry_record_cache("client", event, ggml_backend_buffer_usage_name(usage), size, t_hash_us, 0, 0);
         if (response.result) {
             // the server has the same data, no need to send it
             return;
@@ -583,6 +818,7 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
         const int64_t t_set_us = ggml_time_us() - t_set_start_us;
         LOG_RPC_TELEMETRY("rpc_telemetry: cache client event=set_tensor tensor=%s bytes=%zu usage=%s cache_write=%u cmd_ms=%.3f\n",
                 tensor->name, size, ggml_backend_buffer_usage_name(usage), (unsigned) cache_write, t_set_us/1000.0);
+        rpc_telemetry_record_cache("client", "set_tensor", ggml_backend_buffer_usage_name(usage), size, t_set_us, cache_write, 0);
     }
 }
 
@@ -812,6 +1048,7 @@ static enum ggml_status ggml_backend_rpc_graph_compute(ggml_backend_t backend, g
         const int64_t t_cmd_us = RPC_TELEMETRY ? ggml_time_us() - t_cmd_start_us : 0;
         LOG_RPC_TELEMETRY("rpc_telemetry: graph client backend=%s mode=recompute device=%u nodes=%d payload_bytes=%zu cmd_ms=%.3f\n",
                 ggml_backend_name(backend), rpc_ctx->device, cgraph->n_nodes, sizeof(request), t_cmd_us/1000.0);
+        rpc_telemetry_record_graph_client(ggml_backend_name(backend), "recompute", cgraph->n_nodes, 0, sizeof(request), 0, t_cmd_us);
     } else {
         rpc_dev_ctx->last_graph_uid = cgraph->uid;
         std::vector<uint8_t> input;
@@ -825,6 +1062,7 @@ static enum ggml_status ggml_backend_rpc_graph_compute(ggml_backend_t backend, g
         const int64_t t_cmd_us = RPC_TELEMETRY ? ggml_time_us() - t_cmd_start_us : 0;
         LOG_RPC_TELEMETRY("rpc_telemetry: graph client backend=%s mode=full device=%u nodes=%d tensors=%u payload_bytes=%zu serialize_ms=%.3f cmd_ms=%.3f\n",
                 ggml_backend_name(backend), rpc_ctx->device, cgraph->n_nodes, n_tensors, input.size(), t_serialize_us/1000.0, t_cmd_us/1000.0);
+        rpc_telemetry_record_graph_client(ggml_backend_name(backend), "full", cgraph->n_nodes, n_tensors, input.size(), t_serialize_us, t_cmd_us);
     }
     return GGML_STATUS_SUCCESS;
 }
@@ -1251,6 +1489,7 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
     if (RPC_TELEMETRY && size > HASH_THRESHOLD) {
         LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=set_tensor tensor=%s bytes=%zu cache_write=%u wrote_cache=%u\n",
                 tensor->name, size, (unsigned) cache_write, wrote_cache ? 1u : 0u);
+        rpc_telemetry_record_cache("server", "set_tensor", "unknown", size, 0, cache_write, wrote_cache ? 1 : 0);
     }
     ggml_backend_tensor_set(tensor, data, offset, size);
     return true;
@@ -1282,6 +1521,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
     if (!get_cached_file(request.hash, cached_file)) {
         response.result = 0;
         LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=hash_miss hash=%016" PRIx64 "\n", request.hash);
+        rpc_telemetry_record_cache("server", "hash_miss", "unknown", 0, 0, 0, 0);
         return true;
     }
     size_t size = cached_file.size();
@@ -1318,6 +1558,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
     response.result = 1;
     LOG_RPC_TELEMETRY("rpc_telemetry: cache server event=hash_hit tensor=%s bytes=%zu hash=%016" PRIx64 "\n",
             tensor->name, size, request.hash);
+    rpc_telemetry_record_cache("server", "hash_hit", "unknown", size, 0, 0, 0);
     return true;
 }
 
@@ -1557,6 +1798,7 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
     const int64_t t_compute_us = RPC_TELEMETRY ? ggml_time_us() - t_compute_start_us : 0;
     LOG_RPC_TELEMETRY("rpc_telemetry: graph server mode=full device=%u backend=%s nodes=%u tensors=%u compute_ms=%.3f status=%d\n",
             device, ggml_backend_name(backends[device]), n_nodes, n_tensors, t_compute_us/1000.0, status);
+    rpc_telemetry_record_graph_server(ggml_backend_name(backends[device]), "full", n_nodes, n_tensors, t_compute_us, status);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     stored_graphs[device].graph = graph;
     return true;
@@ -1577,6 +1819,7 @@ bool rpc_server::graph_recompute(const rpc_msg_graph_recompute_req & request) {
     const int64_t t_compute_us = RPC_TELEMETRY ? ggml_time_us() - t_compute_start_us : 0;
     LOG_RPC_TELEMETRY("rpc_telemetry: graph server mode=recompute device=%u backend=%s nodes=%d compute_ms=%.3f status=%d\n",
             device, ggml_backend_name(backends[device]), graph->n_nodes, t_compute_us/1000.0, status);
+    rpc_telemetry_record_graph_server(ggml_backend_name(backends[device]), "recompute", graph->n_nodes, 0, t_compute_us, status);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
     return true;
 }

@@ -58,12 +58,14 @@ Behavior:
 - In the RPC graph client, log full graph send vs graph recompute, graph payload bytes, node count, serialize time, and RPC command time.
 - In the RPC server graph handlers, log backend compute time for full graph and recompute commands.
 - In the RPC tensor cache path, log large-tensor cache events: skipped by scope, hash hit, hash miss, and write intent.
+- Add aggregate `rpc_telemetry: summary ...` totals at normal process exit for scheduler splits, RPC graph client commands, RPC server compute, and cache events.
 
 Verification:
 
 - User runs a CMake build for `ggml-rpc-server`.
 - Run a short prompt with `GGML_RPC_TELEMETRY=1`.
 - Confirm logs show scheduler splits, RPC graph mode, and cache events.
+- Stop the process normally and confirm summary lines print at exit.
 
 ## Task 3: Telemetry Experiment Notes
 

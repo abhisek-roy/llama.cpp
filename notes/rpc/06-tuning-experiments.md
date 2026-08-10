@@ -167,6 +167,66 @@ Compare:
 - RPC graph server `compute_ms`
 - cache `hash_hit`, `hash_miss`, `skipped_scope`, and `cache_write`
 
+When the process exits normally, `GGML_RPC_TELEMETRY=1` also prints aggregate summary lines:
+
+```text
+rpc_telemetry: summary sched ...
+rpc_telemetry: summary graph_client ...
+rpc_telemetry: summary graph_server ...
+rpc_telemetry: summary cache ...
+```
+
+If you want to summarize a saved log before shutdown, these bash commands are useful:
+
+```sh
+grep 'rpc_telemetry: sched ' run.log | awk '{
+  delete kv;
+  for (i = 1; i <= NF; i++) { split($i, a, "="); kv[a[1]] = a[2]; }
+  b = kv["backend"];
+  calls[b]++;
+  bytes[b] += kv["copy_bytes"];
+  copy[b] += kv["copy_ms"];
+  compute[b] += kv["compute_ms"];
+}
+END {
+  for (b in calls) {
+    printf "sched backend=%s calls=%d copy_bytes=%d copy_ms=%.3f compute_ms=%.3f avg_copy_ms=%.3f avg_compute_ms=%.3f\n", b, calls[b], bytes[b], copy[b], compute[b], copy[b]/calls[b], compute[b]/calls[b];
+  }
+}'
+```
+
+```sh
+grep 'rpc_telemetry: graph client ' run.log | awk '{
+  delete kv;
+  for (i = 1; i <= NF; i++) { split($i, a, "="); kv[a[1]] = a[2]; }
+  k = kv["backend"] " " kv["mode"];
+  calls[k]++;
+  payload[k] += kv["payload_bytes"];
+  cmd[k] += kv["cmd_ms"];
+}
+END {
+  for (k in calls) {
+    printf "graph_client %s calls=%d payload_bytes=%d cmd_ms=%.3f avg_cmd_ms=%.3f\n", k, calls[k], payload[k], cmd[k], cmd[k]/calls[k];
+  }
+}'
+```
+
+```sh
+grep 'rpc_telemetry: cache client ' run.log | awk '{
+  delete kv;
+  for (i = 1; i <= NF; i++) { split($i, a, "="); kv[a[1]] = a[2]; }
+  k = kv["event"] " " kv["usage"];
+  calls[k]++;
+  bytes[k] += kv["bytes"];
+  cmd[k] += kv["cmd_ms"];
+}
+END {
+  for (k in calls) {
+    printf "cache_client %s calls=%d bytes=%d cmd_ms=%.3f\n", k, calls[k], bytes[k], cmd[k];
+  }
+}'
+```
+
 ## Experiment 9: RPC Split Scale
 
 Goal: test automatic placement with an RPC penalty while keeping the feature disabled by default.
