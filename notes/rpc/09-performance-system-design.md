@@ -12,6 +12,27 @@ This page captures the system design before more RPC performance changes. The go
 - Prefer controls that preserve current behavior by default.
 - Optimize for the observed setup first: Linux host with `CUDA0`, `CUDA1`, and MacBook `RPC0` over wired 1 GbE.
 
+## Current Private Fork Outcome
+
+This investigation reached a useful private-fork stop point. The setup is worth continuing to use, especially for long-context runs where the MacBook RPC device helps the model fit. Prompt processing is good enough for the target workflow, and token generation improved from about 8 tokens/s to about 10-12 tokens/s with the current placement and cache changes.
+
+Current useful launch shape:
+
+```text
+--rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
+```
+
+Useful environment:
+
+```text
+GGML_RPC_CACHE_SCOPE=weights
+LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
+```
+
+The private switches remain operational controls and diagnostics while this fork continues to take upstream llama.cpp changes. Keep them small and easy to rebase. Do not treat them as an upstream-ready feature set without a separate design pass.
+
+The main performance conclusion is that `RPC0` is useful for capacity but slow as a required token-generation stage. Telemetry showed the MacBook Metal recompute takes about 50 ms, and the Linux client then waits about 52-53 ms in `get_tensor` for a tiny `norm` tensor of 20480 bytes. That wait is dependency and server-completion time, not network bandwidth.
+
 ## Current Runtime Shape
 
 ```mermaid
@@ -242,11 +263,13 @@ flowchart LR
     end
 ```
 
-Async RPC copy, compute, and events are likely the real architectural win for token generation. They are also the largest change because they affect backend capabilities, scheduler assumptions, protocol behavior, and error handling. They should come after telemetry and smaller placement work.
+Async RPC copy, compute, and events remain possible future work, but the measured topology does not justify a client-side worker next. `GRAPH_RECOMPUTE` is already fire-and-forget on the client. The token-generation wait appears in the next dependent `get_tensor`, where the CUDA0 output split needs data from the RPC0 split before it can run. A client-side worker would move that wait, not remove it, unless the scheduler has independent work to run while RPC0 computes.
 
 The first private-fork async-adjacent switch is `GGML_RPC_PIPELINE`. It is disabled by default. When set to `1`, the RPC device advertises async and event support and provides client-side no-op events so the scheduler can take its pipeline-parallel `n_copies > 1` path. It does not make RPC graph compute, tensor set/get, or tensor copy non-blocking. It does not change the RPC protocol or the server. Treat it as a diagnostic for scheduler pipeline behavior and memory pressure before building a real RPC worker-thread or protocol-level async path.
 
-## Roadmap
+In the current measurements, `GGML_RPC_PIPELINE=1` did not materially improve token generation and increased compute-buffer pressure. Keep it off for normal use unless testing scheduler behavior.
+
+## Consolidated Roadmap State
 
 ```mermaid
 flowchart TD
@@ -255,53 +278,53 @@ flowchart TD
     C --> D["Use telemetry to tune tensor split manually"]
     D --> E["Add RPC-aware placement scoring"]
     E --> F["Evaluate output placement controls"]
-    C --> G["Decide whether async RPC is worth the cost"]
-    G --> H["Prototype async copy, compute, and events"]
-    H --> I["Reduce per-token RPC round trips"]
+    C --> G["Evaluate pipeline diagnostic"]
+    G --> H["Defer async worker for this topology"]
+    H --> I["Continue with operational tuning"]
 ```
 
-Best first implementation changes:
+Completed private-fork changes:
 
-1. Add RPC and scheduler timing telemetry.
-2. Finish and test RPC cache policy.
-3. Add RPC-aware placement scoring after telemetry.
+1. RPC cache scope.
+2. RPC and scheduler timing telemetry.
+3. RPC-aware placement scale for automatic placement.
+4. Output placement override.
+5. RPC pipeline diagnostic switch.
+6. `get_tensor` wait telemetry.
 
-Bigger changes:
+Deferred work:
 
-4. Implement async RPC copy, compute, and events.
-5. Reduce per-token RPC round trips.
-6. Add explicit output and final-layer placement controls.
+1. Client-side async worker. It is not expected to improve the current placement because the dependent CUDA0 output split immediately needs RPC0's result.
+2. Protocol-level async or server worker changes. These are larger private-fork divergences and are not justified by the current measurements.
+3. Further placement and memory work. This is the likely useful direction if more TG speed is needed.
 
-## Immediate Experiment Plan
+## Operational Follow-Up Checks
 
 Use the current useful launch shape:
 
 ```text
---rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 7,3,6
+--rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
 ```
 
-Compare the same prompt and model with the MacBook server using `--cache`:
+The normal-use setting is:
 
 ```text
-GGML_RPC_CACHE_SCOPE=all
 GGML_RPC_CACHE_SCOPE=weights
-GGML_RPC_CACHE_SCOPE=none
+LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
 ```
 
-Expected interpretation:
+Use `GGML_RPC_TELEMETRY=1` only for measurement runs. Normal runs can leave telemetry off.
 
-- `all`: preserves old cache behavior and can still write transient large tensors.
-- `weights`: should keep warm model-load cache benefits and reduce prompt-time cache writes.
-- `none`: should remove client-side cache probes and writes, but warm model load can become slower.
+Optional diagnostics:
 
-Record prompt processing speed, token generation speed, RPC cache log lines, and whether this is the first or second run after the server cache is warm.
+- `GGML_RPC_CACHE_SCOPE=none`: use only if cache telemetry suggests unexpected hash or write behavior.
+- `GGML_RPC_PIPELINE=1`: use only to check scheduler pipeline behavior or memory pressure. It did not materially improve TG in this setup.
+- `LLAMA_RPC_SPLIT_SCALE`: use only when testing automatic placement without explicit `--tensor-split`.
 
-After that, test automatic placement with `LLAMA_RPC_SPLIT_SCALE`:
+For placement experiments with `LLAMA_RPC_SPLIT_SCALE`, run without explicit `--tensor-split` and compare the chosen layer placement against the manual `--tensor-split 6.5,3,6.5` baseline:
 
 ```text
 LLAMA_RPC_SPLIT_SCALE=0.75
 LLAMA_RPC_SPLIT_SCALE=0.50
 LLAMA_RPC_SPLIT_SCALE=0.25
 ```
-
-Run without explicit `--tensor-split` for this experiment. Compare the chosen layer placement against the manual `--tensor-split 7,3,6` baseline.

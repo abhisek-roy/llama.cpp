@@ -10,7 +10,8 @@ Your current mental model:
 - Remote RPC host: MacBook with 24 GB unified memory.
 - Network path: LAN through a USB-C Ethernet adapter to the router.
 - Model: Qwen3.6 27B, 8 bit quant.
-- Observed speed: about 150 tokens/s prompt processing and 12 tokens/s token generation.
+- Observed speed after private-fork tuning: good prompt processing and about 10-12 tokens/s token generation, improved from about 8 tokens/s.
+- Current plan: keep using this private-fork setup for long-context work while continuing to take upstream llama.cpp changes.
 
 Read in order:
 
