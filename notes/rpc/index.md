@@ -24,6 +24,7 @@ Read in order:
 8. [Launch command analysis](08-launch-command-analysis.md)
 9. [RPC performance system design](09-performance-system-design.md)
 10. [RPC performance implementation plan](10-implementation-plan.md)
+11. [Async RPC research report](11-async-rpc-research-report.md)
 
 Core idea:
 

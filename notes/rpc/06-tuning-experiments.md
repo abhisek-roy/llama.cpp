@@ -248,6 +248,49 @@ LLAMA_RPC_SPLIT_SCALE=0.25
 
 Use `GGML_RPC_TELEMETRY=1` and `GGML_RPC_CACHE_SCOPE=weights` during these runs. Compare the layer placement logs, PP/TG speed, and `rpc_telemetry:` split lines against the manual `--tensor-split 7,3,6` baseline.
 
+## Experiment 10: RPC Pipeline Event Prototype
+
+Goal: test whether the scheduler pipeline path helps when RPC is present.
+
+This is controlled by:
+
+```text
+GGML_RPC_PIPELINE=1
+```
+
+Default behavior is unchanged when the variable is unset or `0`. When enabled, the RPC backend advertises async and event support and provides client-side no-op events. RPC commands still block on the socket and server response. This does not implement real async RPC.
+
+Start from the current fitting launch:
+
+```text
+GGML_RPC_CACHE_SCOPE=weights
+LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
+--rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
+```
+
+Compare two runs:
+
+```text
+GGML_RPC_PIPELINE unset
+GGML_RPC_PIPELINE=1
+```
+
+For measurement runs, also set:
+
+```text
+GGML_RPC_TELEMETRY=1
+```
+
+Watch for:
+
+- startup line: `pipeline parallelism enabled`
+- reservation fallback: `compute buffer allocation failed, retrying without pipeline parallelism`
+- PP and TG speed
+- `rpc_telemetry: summary sched ...` by backend
+- changes in compute buffer memory pressure
+
+Expected result: this may show no speed gain because RPC graph compute and tensor transfers are still blocking. It is useful if it proves whether the scheduler pipeline path itself helps or only increases memory use.
+
 ## Experiment Log Template
 
 ```text

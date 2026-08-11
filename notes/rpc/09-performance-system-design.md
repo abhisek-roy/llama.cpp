@@ -244,6 +244,8 @@ flowchart LR
 
 Async RPC copy, compute, and events are likely the real architectural win for token generation. They are also the largest change because they affect backend capabilities, scheduler assumptions, protocol behavior, and error handling. They should come after telemetry and smaller placement work.
 
+The first private-fork async-adjacent switch is `GGML_RPC_PIPELINE`. It is disabled by default. When set to `1`, the RPC device advertises async and event support and provides client-side no-op events so the scheduler can take its pipeline-parallel `n_copies > 1` path. It does not make RPC graph compute, tensor set/get, or tensor copy non-blocking. It does not change the RPC protocol or the server. Treat it as a diagnostic for scheduler pipeline behavior and memory pressure before building a real RPC worker-thread or protocol-level async path.
+
 ## Roadmap
 
 ```mermaid

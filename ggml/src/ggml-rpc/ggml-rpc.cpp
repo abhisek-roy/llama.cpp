@@ -56,6 +56,13 @@ static rpc_cache_scope get_rpc_cache_scope() {
 
 static const rpc_cache_scope RPC_CACHE_SCOPE = get_rpc_cache_scope();
 
+static bool get_rpc_pipeline() {
+    const char * value = std::getenv("GGML_RPC_PIPELINE");
+    return value != nullptr && std::atoi(value) > 0;
+}
+
+static const bool RPC_PIPELINE = get_rpc_pipeline();
+
 
 namespace fs = std::filesystem;
 
@@ -985,7 +992,40 @@ static void ggml_backend_rpc_free(ggml_backend_t backend) {
 
 static void ggml_backend_rpc_synchronize(ggml_backend_t backend) {
     GGML_UNUSED(backend);
-    // this is no-op because we don't have any async operations
+    // no-op: all rpc ops are blocking, nothing to wait on
+}
+
+// fake events for client-side pipeline parallelism (GGML_RPC_PIPELINE=1).
+// rpc ops are blocking, so record/wait/synchronize are no-ops; they only exist
+// to let the scheduler take its n_copies > 1 code path.
+static ggml_backend_event_t ggml_backend_rpc_device_event_new(ggml_backend_dev_t dev) {
+    if (!RPC_PIPELINE) {
+        return nullptr;
+    }
+    return new ggml_backend_event {
+        /* .device  = */ dev,
+        /* .context = */ nullptr,
+    };
+}
+
+static void ggml_backend_rpc_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    GGML_UNUSED(dev);
+    delete event;
+}
+
+static void ggml_backend_rpc_device_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    GGML_UNUSED(dev);
+    GGML_UNUSED(event);
+}
+
+static void ggml_backend_rpc_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
+    GGML_UNUSED(backend);
+    GGML_UNUSED(event);
+}
+
+static void ggml_backend_rpc_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+    GGML_UNUSED(backend);
+    GGML_UNUSED(event);
 }
 
 static void add_tensor(ggml_tensor * tensor, std::vector<rpc_tensor> & tensors, std::unordered_set<ggml_tensor*> & visited) {
@@ -1081,8 +1121,8 @@ static ggml_backend_i ggml_backend_rpc_interface = {
     /* .graph_plan_update       = */ NULL,
     /* .graph_plan_compute      = */ NULL,
     /* .graph_compute           = */ ggml_backend_rpc_graph_compute,
-    /* .event_record            = */ NULL,
-    /* .event_wait              = */ NULL,
+    /* .event_record            = */ ggml_backend_rpc_event_record,
+    /* .event_wait              = */ ggml_backend_rpc_event_wait,
     /* .graph_optimize          = */ NULL,
 };
 
@@ -2228,10 +2268,10 @@ static void ggml_backend_rpc_device_get_props(ggml_backend_dev_t dev, struct ggm
     props->type        = ggml_backend_rpc_device_get_type(dev);
     ggml_backend_rpc_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->caps = {
-        /* .async                 = */ false,
+        /* .async                 = */ RPC_PIPELINE,
         /* .host_buffer           = */ false,
         /* .buffer_from_host_ptr  = */ false,
-        /* .events                = */ false,
+        /* .events                = */ RPC_PIPELINE,
     };
 }
 
@@ -2280,9 +2320,9 @@ static const struct ggml_backend_device_i ggml_backend_rpc_device_i = {
     /* .supports_op          = */ ggml_backend_rpc_device_supports_op,
     /* .supports_buft        = */ ggml_backend_rpc_device_supports_buft,
     /* .offload_op           = */ NULL,
-    /* .event_new            = */ NULL,
-    /* .event_free           = */ NULL,
-    /* .event_synchronize    = */ NULL,
+    /* .event_new            = */ ggml_backend_rpc_device_event_new,
+    /* .event_free           = */ ggml_backend_rpc_device_event_free,
+    /* .event_synchronize    = */ ggml_backend_rpc_device_event_synchronize,
 };
 
 // backend reg interface

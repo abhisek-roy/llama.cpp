@@ -29,6 +29,7 @@
 /.direnv/
 /.envrc
 /.idea/
+/.pi/
 /.swiftpm
 /.vs/
 /.vscode/

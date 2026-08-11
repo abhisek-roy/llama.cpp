@@ -146,20 +146,28 @@ Verification:
 
 ## Task 6: Async RPC Prototype
 
+Status: first diagnostic prototype in progress.
+
 Files:
 
 - `ggml/src/ggml-rpc/ggml-rpc.cpp`
-- `ggml/src/ggml-rpc/transport.cpp`
-- `ggml/src/ggml-backend.cpp`
 - `notes/rpc/09-performance-system-design.md`
+- `notes/rpc/10-implementation-plan.md`
+- `notes/rpc/06-tuning-experiments.md`
 
 Behavior:
 
-- Prototype async copy, compute, and event support for RPC.
-- Keep it behind a private fork flag.
-- Do not start this until telemetry and placement experiments show that serialized RPC split execution is still the main bottleneck.
+- Add `GGML_RPC_PIPELINE=1`.
+- Default off: RPC keeps reporting no async and no events.
+- When enabled, RPC reports async and events so llama.cpp can enable scheduler pipeline parallelism.
+- Implement only client-side no-op RPC events because RPC commands are still blocking.
+- Do not change RPC protocol, server behavior, transport, worker threads, or async tensor copy yet.
+- Treat this as a diagnostic for scheduler pipeline behavior and memory pressure, not as real async RPC.
 
 Verification:
 
-- Compare split overlap with telemetry.
-- Compare TG speed on the same prompt and split.
+- User runs the relevant build targets.
+- Run the same prompt with and without `GGML_RPC_PIPELINE=1`.
+- Confirm startup says `pipeline parallelism enabled` when the switch is on.
+- Compare PP/TG, `rpc_telemetry: summary sched ...`, and whether graph reservation falls back after extra compute-buffer pressure.
+- If this does not help TG, keep it off and design the next step around a real client-side RPC worker queue.
