@@ -835,8 +835,15 @@ static void ggml_backend_rpc_buffer_get_tensor(ggml_backend_buffer_t buffer, con
     request.tensor = serialize_tensor(tensor);
     request.offset = offset;
     request.size = size;
+    const int64_t t_start_us = RPC_TELEMETRY ? ggml_time_us() : 0;
     bool status = send_rpc_cmd(ctx->sock, RPC_CMD_GET_TENSOR, &request, sizeof(request), data, size);
+    const int64_t t_wait_us = RPC_TELEMETRY ? ggml_time_us() - t_start_us : 0;
     RPC_STATUS_ASSERT(status);
+    if (RPC_TELEMETRY) {
+        ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buffer->buft->context;
+        LOG_RPC_TELEMETRY("rpc_telemetry: get_tensor client endpoint=%s device=%u tensor=%s bytes=%zu wait_ms=%.3f\n",
+                buft_ctx->endpoint.c_str(), buft_ctx->device, tensor->name, size, t_wait_us/1000.0);
+    }
 }
 
 static bool ggml_backend_rpc_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
