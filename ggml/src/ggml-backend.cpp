@@ -20,12 +20,118 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef __APPLE__
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
+
+static bool ggml_rpc_telemetry_enabled(void) {
+    const char * value = getenv("GGML_RPC_TELEMETRY");
+    return value != NULL && atoi(value) > 0;
+}
+
+struct ggml_rpc_sched_telemetry_stats {
+    uint64_t calls = 0;
+    uint64_t nodes = 0;
+    uint64_t inputs = 0;
+    uint64_t errors = 0;
+    size_t   copy_bytes = 0;
+    double   copy_ms = 0.0;
+    double   compute_ms = 0.0;
+    double   max_copy_ms = 0.0;
+    double   max_compute_ms = 0.0;
+};
+
+static std::mutex & ggml_rpc_sched_telemetry_mutex() {
+    static std::mutex * mutex = new std::mutex;
+    return *mutex;
+}
+
+static std::unordered_map<std::string, ggml_rpc_sched_telemetry_stats> & ggml_rpc_sched_telemetry_map() {
+    static std::unordered_map<std::string, ggml_rpc_sched_telemetry_stats> * map = new std::unordered_map<std::string, ggml_rpc_sched_telemetry_stats>;
+    return *map;
+}
+
+static void ggml_rpc_sched_telemetry_print_summary() {
+    std::lock_guard<std::mutex> lock(ggml_rpc_sched_telemetry_mutex());
+
+    for (const auto & item : ggml_rpc_sched_telemetry_map()) {
+        const ggml_rpc_sched_telemetry_stats & stats = item.second;
+        if (stats.calls == 0) {
+            continue;
+        }
+
+        GGML_LOG_INFO(
+                "rpc_telemetry: summary sched backend=%s calls=%llu nodes=%llu inputs=%llu copy_bytes=%zu copy_ms=%.3f avg_copy_ms=%.3f max_copy_ms=%.3f compute_ms=%.3f avg_compute_ms=%.3f max_compute_ms=%.3f errors=%llu\n",
+                item.first.c_str(),
+                (unsigned long long) stats.calls,
+                (unsigned long long) stats.nodes,
+                (unsigned long long) stats.inputs,
+                stats.copy_bytes,
+                stats.copy_ms,
+                stats.copy_ms / stats.calls,
+                stats.max_copy_ms,
+                stats.compute_ms,
+                stats.compute_ms / stats.calls,
+                stats.max_compute_ms,
+                (unsigned long long) stats.errors);
+    }
+}
+
+static void ggml_rpc_sched_telemetry_register_summary() {
+    static const bool registered = []() {
+        atexit(ggml_rpc_sched_telemetry_print_summary);
+        return true;
+    }();
+    (void) registered;
+}
+
+static void ggml_rpc_sched_telemetry_record(
+        const char * backend,
+        int nodes,
+        int inputs,
+        size_t copy_bytes,
+        int64_t copy_us,
+        int64_t compute_us,
+        enum ggml_status status) {
+    ggml_rpc_sched_telemetry_register_summary();
+
+    const double copy_ms    = copy_us/1000.0;
+    const double compute_ms = compute_us/1000.0;
+
+    std::lock_guard<std::mutex> lock(ggml_rpc_sched_telemetry_mutex());
+
+    ggml_rpc_sched_telemetry_stats & stats = ggml_rpc_sched_telemetry_map()[backend];
+    stats.calls++;
+    stats.nodes          += nodes;
+    stats.inputs         += inputs;
+    stats.errors         += status == GGML_STATUS_SUCCESS ? 0 : 1;
+    stats.copy_bytes     += copy_bytes;
+    stats.copy_ms        += copy_ms;
+    stats.compute_ms     += compute_ms;
+    stats.max_copy_ms     = std::max(stats.max_copy_ms, copy_ms);
+    stats.max_compute_ms  = std::max(stats.max_compute_ms, compute_ms);
+}
+
+static void ggml_rpc_sched_telemetry_log_split(
+        int split_id,
+        int n_splits,
+        const char * backend,
+        int nodes,
+        int inputs,
+        size_t copy_bytes,
+        int64_t copy_us,
+        int64_t compute_us,
+        enum ggml_status status) {
+    GGML_LOG_INFO("rpc_telemetry: sched split=%d/%d backend=%s nodes=%d inputs=%d copy_bytes=%zu copy_ms=%.3f compute_ms=%.3f status=%d\n",
+            split_id, n_splits, backend, nodes, inputs, copy_bytes, copy_us/1000.0, compute_us/1000.0, status);
+    ggml_rpc_sched_telemetry_record(backend, nodes, inputs, copy_bytes, copy_us, compute_us, status);
+}
 
 
 // backend buffer type
@@ -1594,6 +1700,7 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
+    const bool rpc_telemetry = ggml_rpc_telemetry_enabled();
 
     ggml_tensor * prev_ids_tensor = nullptr;
     std::vector<int32_t> ids;
@@ -1605,10 +1712,13 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
         // copy the input tensors to the split backend
+        size_t copy_bytes = 0;
+        const int64_t t_copy_start_us = rpc_telemetry ? ggml_time_us() : 0;
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
             struct ggml_tensor * input = split->inputs[input_id];
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+            copy_bytes += ggml_nbytes(input);
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
@@ -1726,10 +1836,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 }
             }
         }
+        const int64_t t_copy_us = rpc_telemetry ? ggml_time_us() - t_copy_start_us : 0;
 
+        const int64_t t_compute_start_us = rpc_telemetry ? ggml_time_us() : 0;
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
+                if (rpc_telemetry) {
+                    const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+                    ggml_rpc_sched_telemetry_log_split(split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us, t_compute_us, ec);
+                }
                 return ec;
             }
         } else {
@@ -1752,6 +1868,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv);
                 if (ec != GGML_STATUS_SUCCESS) {
+                    if (rpc_telemetry) {
+                        const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+                        ggml_rpc_sched_telemetry_log_split(split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us, t_compute_us, ec);
+                    }
                     return ec;
                 }
 
@@ -1764,6 +1884,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 j0 = j1;
             }
+        }
+        if (rpc_telemetry) {
+            const int64_t t_compute_us = ggml_time_us() - t_compute_start_us;
+            ggml_rpc_sched_telemetry_log_split(split_id, sched->n_splits, ggml_backend_name(split_backend), split->graph.n_nodes, split->n_inputs, copy_bytes, t_copy_us, t_compute_us, GGML_STATUS_SUCCESS);
         }
 
         // record the event of this copy

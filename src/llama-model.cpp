@@ -27,6 +27,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
@@ -37,6 +38,27 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+static bool llama_model_dev_is_rpc(ggml_backend_dev_t dev) {
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    return reg && strcmp(ggml_backend_reg_name(reg), "RPC") == 0;
+}
+
+static float llama_model_rpc_split_scale() {
+    const char * value = getenv("LLAMA_RPC_SPLIT_SCALE");
+    if (value == nullptr || value[0] == '\0') {
+        return 1.0f;
+    }
+
+    char * end = nullptr;
+    const float scale = strtof(value, &end);
+    if (end == value || !std::isfinite(scale) || scale <= 0.0f) {
+        LLAMA_LOG_WARN("%s: ignoring invalid LLAMA_RPC_SPLIT_SCALE='%s'\n", __func__, value);
+        return 1.0f;
+    }
+
+    return scale;
+}
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
@@ -1310,6 +1332,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     std::vector<float> splits(n_devices());
     if (all_zero) {
         // default split, by free memory
+        const float rpc_split_scale = llama_model_rpc_split_scale();
         for (size_t i = 0; i < n_devices(); ++i) {
             ggml_backend_dev_t dev = devices[i].dev;
             size_t total;
@@ -1321,6 +1344,12 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             // fixes: https://github.com/ggml-org/llama.cpp/issues/18577
             if (free == 0 && total == 0) {
                 ggml_backend_dev_memory(cpu_dev, &free, &total);
+            }
+            if (rpc_split_scale != 1.0f && llama_model_dev_is_rpc(dev)) {
+                const size_t free_orig = free;
+                free = size_t(double(free) * double(rpc_split_scale));
+                LLAMA_LOG_INFO("%s: LLAMA_RPC_SPLIT_SCALE=%g changes %s split memory from %.2f MiB to %.2f MiB\n",
+                        __func__, double(rpc_split_scale), ggml_backend_dev_name(dev), free_orig/1024.0/1024.0, free/1024.0/1024.0);
             }
             splits[i] = free;
         }
@@ -1364,6 +1393,33 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
+    LLAMA_LOG_INFO("%s: output layer default device = %s\n", __func__, ggml_backend_dev_name(pimpl->dev_output.dev));
+
+    const char * output_layer_device = getenv("LLAMA_OUTPUT_LAYER_DEVICE");
+    if (output_layer_device != nullptr && output_layer_device[0] != '\0') {
+        std::ostringstream available;
+        bool first = true;
+        ggml_backend_dev_t override_dev = nullptr;
+        for (const auto & dev : devices) {
+            const char * dev_name = ggml_backend_dev_name(dev.dev);
+            if (!first) {
+                available << ", ";
+            }
+            first = false;
+            available << dev_name;
+            if (strcmp(output_layer_device, dev_name) == 0) {
+                override_dev = dev.dev;
+            }
+        }
+
+        if (override_dev == nullptr) {
+            const std::string available_str = first ? "none" : available.str();
+            throw std::runtime_error(format("%s: LLAMA_OUTPUT_LAYER_DEVICE='%s' does not match selected offload devices: %s", __func__, output_layer_device, available_str.c_str()));
+        }
+
+        pimpl->dev_output = { override_dev, &pimpl->gpu_buft_list.at(override_dev) };
+        LLAMA_LOG_INFO("%s: LLAMA_OUTPUT_LAYER_DEVICE=%s sets output layer device = %s\n", __func__, output_layer_device, ggml_backend_dev_name(pimpl->dev_output.dev));
+    }
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
