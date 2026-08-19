@@ -1,6 +1,6 @@
 # Inference Execution
 
-Traceability source commit: `b89f44654161`
+Traceability source commit: `52e5dda62`
 
 ## Main Flow
 
@@ -69,6 +69,19 @@ sequenceDiagram
 ```
 
 The remote server does not sample tokens and does not own the full llama context. It only executes the ggml graph fragment it receives.
+
+### Tensor Use Counts In The Serialized Graph
+
+Since upstream `af5172627` (merged at `52e5dda62`), each serialized graph fragment also carries a per-tensor use count: how many ops in the full graph read that tensor.
+
+- `ggml_visit_parents_graph()` fills the cgraph `visited_hash_set` and `use_counts` at graph build time in the main process.
+- Scheduler splits are `ggml_graph_view()` of the full graph, so they share those arrays.
+- When serializing a split, `add_tensor()` looks each tensor up in the shared hash set and packs the count into `rpc_tensor.use_count`, the field that used to be 4 bytes of padding. Wire size is unchanged.
+- `rpc_server::graph_compute()` restores the counts into the deserialized remote graph.
+
+The counts are sent, not recomputed on the server. The server only sees a partial graph, so a locally recomputed count would be wrong: a tensor used once remotely and once locally would count as 1 there, which breaks the used-exactly-once checks that backend fusion logic relies on (`ggml_node_has_n_uses()` in `ggml/src/ggml-impl.h`).
+
+Status at this merge: no in-tree Metal or CPU fusion rule consumes use counts yet. Current consumers are the meta-backend MoE AllReduce delay logic and OpenVINO. This is infrastructure, so expect no perf change on the dense model.
 
 ## Pipeline Parallelism And RPC
 

@@ -1,6 +1,6 @@
 # Performance Bottlenecks
 
-Traceability source commit: `b89f44654161`
+Traceability source commit: `52e5dda62`
 
 Your current numbers, about 150 tokens/s prompt processing and 12 tokens/s token generation, are plausible for a setup where prompt processing has enough work per batch to hide some overhead, while token generation is dominated by latency, synchronization, and the slowest layer segment.
 
@@ -138,6 +138,12 @@ The current automatic split is memory-based. A better placement model would use 
 Likely impact: medium.
 
 RPC uses temporary buffers for graph and tensor payloads. Reducing copies and improving transfer paths can help, but it is probably less important than reducing remote layer share and adding async/event support.
+
+### 11. Remote-Side Fusion Infrastructure
+
+Likely impact: low for now, potentially higher later.
+
+As of upstream `6d0549831` (merged at `52e5dda62`), the RPC server's deserialized graph carries correct global tensor use counts, so the remote backend can make the same used-exactly-once fusion decisions as local backends. In-tree consumers today are only the meta-backend MoE AllReduce delay logic and OpenVINO, so expect no change on the dense model. If Metal or CPU op fusion rules start using use counts, the RPC path picks that up for free.
 
 ## Older Short-Term Checklist
 
