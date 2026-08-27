@@ -1,8 +1,8 @@
 # RPC Performance Implementation Plan
 
-Traceability source commit: `59abc3967`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
-This plan breaks [RPC performance system design](09-performance-system-design.md) into small private-fork changes. Do not submit these changes upstream without a separate discussion.
+This document records the private-fork implementation plan and its current status after the 2026-08-27 upstream merge. Completed items are retained for traceability. Superseded items are labeled rather than rewritten as if they were current work.
 
 ## Ground Rules
 
@@ -14,7 +14,7 @@ This plan breaks [RPC performance system design](09-performance-system-design.md
 
 ## Final Investigation Status
 
-This private-fork investigation is complete enough for continued use. The current setup gives good prompt processing for the target workflow and improved token generation from about 8 tokens/s to about 10-12 tokens/s. The useful operational shape is:
+The pre-merge private-fork investigation was complete enough for continued use. That setup gave good prompt processing for the target workflow and improved token generation from about 8 tokens/s to about 10-12 tokens/s. Use the following shape as the first post-merge validation candidate:
 
 ```text
 --rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
@@ -22,11 +22,11 @@ GGML_RPC_CACHE_SCOPE=weights
 LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
 ```
 
-The fork will continue to track upstream llama.cpp changes. Keep these private switches small, opt-in, and easy to rebase.
+The fork will continue to track upstream llama.cpp changes. Keep the remaining private switches small, opt-in, and easy to rebase.
 
 Telemetry showed that the MacBook RPC shard is on the token-generation critical path. `GRAPH_RECOMPUTE` is already fire-and-forget from the client, while the following `get_tensor tensor=norm` waits about 52-53 ms for only 20480 bytes. That wait matches the MacBook Metal recompute time of about 50 ms. This means the bottleneck is dependency and server-completion time, not network bandwidth or client-side graph command blocking.
 
-Do not implement `GGML_RPC_ASYNC_WORKER=1` for this topology. It would move the wait to a future that the CUDA0 output split immediately needs. Future work should focus on placement, context or KV memory pressure, model choice, or topology changes.
+Upstream now supplies the equivalent worker architecture through `rpc_dispatcher`, async tensor and graph submission, synchronization, and real events. This should be measured before considering more async machinery. The dependent CUDA0 output split can still move the wait to a later fence without reducing the MacBook's compute time.
 
 ## Task 1: RPC Cache Scope
 
@@ -71,11 +71,11 @@ Behavior:
 
 - Add `GGML_RPC_TELEMETRY=1`.
 - In the scheduler split loop, log split index, backend name, input count, copied bytes, copy time, compute time, and node count.
-- In the RPC graph client, log full graph send vs graph recompute, graph payload bytes, node count, serialize time, and RPC command time.
+- In the RPC graph client, log full graph send vs graph recompute, graph payload bytes, node count, serialize time, and queue submission time.
 - In the RPC server graph handlers, log backend compute time for full graph and recompute commands.
 - In the RPC tensor cache path, log large-tensor cache events: skipped by scope, hash hit, hash miss, and write intent.
 - In `get_tensor`, log blocking wait time with endpoint, device, tensor name, and byte count.
-- Add aggregate `rpc_telemetry: summary ...` totals at normal process exit for scheduler splits, RPC graph client commands, RPC server compute, and cache events.
+- Add aggregate `rpc_telemetry: summary ...` totals at normal process exit for scheduler splits, RPC graph client enqueue time, RPC server compute, and cache events.
 
 Verification:
 
@@ -163,7 +163,7 @@ Verification:
 
 ## Task 6: RPC Pipeline Diagnostic
 
-Status: implemented and evaluated as a diagnostic.
+Status: historical experiment, removed during the upstream merge.
 
 Files:
 
@@ -172,7 +172,7 @@ Files:
 - `notes/rpc/10-implementation-plan.md`
 - `notes/rpc/06-tuning-experiments.md`
 
-Behavior:
+Historical behavior:
 
 - Add `GGML_RPC_PIPELINE=1`.
 - Default off: RPC keeps reporting no async and no events.
@@ -181,13 +181,21 @@ Behavior:
 - Do not change RPC protocol, server behavior, transport, worker threads, or async tensor copy yet.
 - Treat this as a diagnostic for scheduler pipeline behavior and memory pressure, not as real async RPC.
 
-Verification:
+Historical result:
 
 - User runs the relevant build targets.
 - Run the same prompt with and without `GGML_RPC_PIPELINE=1`.
 - Confirm startup says `pipeline parallelism enabled` when the switch is on.
 - Compare PP/TG, `rpc_telemetry: summary sched ...`, and whether graph reservation falls back after extra compute-buffer pressure.
 - The diagnostic did not materially improve TG and increased memory pressure. Keep it off for normal use.
+
+Current replacement:
+
+- Upstream's `rpc_dispatcher` queues work on a worker thread.
+- Graph compute, graph recompute, and backend async tensor operations use `send_async()`.
+- Synchronization and events use real queue completion fences.
+- RPC reports async and event support without an environment switch.
+- `GGML_RPC_PIPELINE` is no longer recognized.
 
 ## Task 7: `get_tensor` Wait Telemetry
 
@@ -204,22 +212,44 @@ Behavior:
 
 - Under `GGML_RPC_TELEMETRY=1`, log `get_tensor` wait time as `wait_ms`.
 - Include RPC endpoint, device id, tensor name, and byte count.
-- Leave `graph_compute` telemetry unchanged because recompute and full graph paths already log `cmd_ms`.
-- Do not change RPC protocol, scheduler behavior, cache policy, events, or async behavior.
+- Report graph submission as `enqueue_ms`; it does not include transfer or remote compute.
+- Keep `get_tensor wait_ms` as the measurement for a blocking dependent read.
 
 Verification:
 
 - User built and ran the telemetry branch.
-- Client logs showed `graph client ... mode=recompute ... cmd_ms=0.001-0.002`.
+- Pre-merge client logs showed `graph client ... mode=recompute ... cmd_ms=0.001-0.002`.
 - Client logs showed `get_tensor client endpoint=192.168.0.118:50052 device=0 tensor=norm bytes=20480 wait_ms=52-53`.
 - Server logs showed `graph server mode=recompute device=0 backend=MTL0 nodes=1369 compute_ms=about 50`.
 - This confirms the token-generation wait lands at the dependent RPC0 to CUDA0 output boundary.
 
+## Task 8: Upstream RPC Integration
+
+Status: code merged and RPC targets built successfully; runtime validation remains.
+
+Behavior:
+
+- Adopt upstream's per-endpoint queued dispatcher.
+- Adopt asynchronous graph compute, graph recompute, and tensor set/get.
+- Adopt real queue-backed events and unconditional async/event capabilities.
+- Remove the private fake-event `GGML_RPC_PIPELINE` implementation.
+- Apply `GGML_RPC_CACHE_SCOPE` to both synchronous and asynchronous tensor upload paths.
+- Retain `GGML_RPC_TELEMETRY`, `LLAMA_RPC_SPLIT_SCALE`, and `LLAMA_OUTPUT_LAYER_DEVICE`.
+- Use protocol `7.0.0` because the private `cache_write` byte changes the tensor payload.
+- Document Linux RDMA and Apple silicon RDMA over Thunderbolt.
+
+Verification:
+
+- The pre-merge RPC-enabled build succeeded.
+- After conflict resolution, the user successfully built `ggml-rpc-server` and `llama-server`.
+- Run a matched client/server smoke test before finalizing the merge.
+- Run telemetry once to verify `enqueue_ms`, server `compute_ms`, dependent `wait_ms`, cache scope, and pipeline behavior.
+
 ## Stop Point
 
-Keep the current private-fork changes and continue to take upstream llama.cpp changes. The next useful work is operational tuning, not more RPC execution machinery:
+Keep the current private-fork changes and continue to take upstream llama.cpp changes. Validate the merged async implementation first, then return to operational tuning:
 
 - Try to reduce RPC0's critical-path layer share if memory allows.
 - Explore KV/cache memory reduction if it lets more work stay on CUDA.
 - Treat `--split-mode row` or tensor-parallel modes as a controlled falsification test only; over 1 GbE they are likely to add more synchronization.
-- Do not pursue client-side async worker work unless a new placement or scheduler structure creates independent CUDA work that can overlap with RPC0.
+- Do not add another client-side async layer unless post-merge telemetry identifies independent work that the dispatcher cannot overlap.

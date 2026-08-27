@@ -43,10 +43,10 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 9
+#define LLAMA_SESSION_VERSION 10
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
-#define LLAMA_STATE_SEQ_VERSION 2
+#define LLAMA_STATE_SEQ_VERSION 3
 
 #ifdef __cplusplus
 extern "C" {
@@ -733,7 +733,7 @@ extern "C" {
 
     // Removes all tokens that belong to the specified sequence and have positions in [p0, p1)
     // Returns false if a partial sequence cannot be removed. Removing a whole sequence never fails
-    // seq_id < 0 : match any sequence
+    // seq_id < 0 : match any sequence [TAG_LLAMA_SEQ_ID_NEG]
     // p0 < 0     : [0,  p1]
     // p1 < 0     : [p0, inf)
     LLAMA_API bool llama_memory_seq_rm(

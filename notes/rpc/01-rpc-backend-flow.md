@@ -1,6 +1,6 @@
 # RPC Backend Flow
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 ## What RPC Is
 
@@ -91,6 +91,27 @@ The important command groups are:
 - graph execution: graph compute, graph recompute
 - cache support: set tensor hash for large tensors
 
+This private fork uses protocol `7.0.0`. The major version differs from upstream because the fork adds a `cache_write` byte to `RPC_CMD_SET_TENSOR`. A fork client and server must therefore be built from the same compatible source. The `HELLO` handshake rejects peers with a different major version before tensor traffic begins.
+
+## Dispatcher And Ordering
+
+Each endpoint has one shared `rpc_dispatcher`. Callers enqueue commands, and a worker thread performs socket I/O in queue order.
+
+- `send()` enqueues a command and waits for its completion.
+- `send_async()` enqueues a command and returns.
+- `synchronize()` enqueues a fence and waits for all earlier commands.
+- RPC events are queue fences backed by futures, not simulated no-op events.
+
+Graph compute, graph recompute, and backend async tensor operations use `send_async()`. Buffer-interface tensor operations remain synchronous. A later dependent read or synchronization point waits for earlier queued remote work.
+
+The RPC device now reports async and event support unconditionally. The former private `GGML_RPC_PIPELINE` fake-event experiment was removed during the upstream merge.
+
+## Transport Selection
+
+The command protocol runs over the transport selected during `HELLO`. TCP is always available. If both peers were built with RDMA support and advertise compatible capabilities, the connection upgrades automatically; otherwise it stays on TCP. Set `GGML_RPC_NO_RDMA=1` on either peer to force TCP.
+
+Current RDMA implementations cover Linux RoCE/InfiniBand through `libibverbs` and Apple silicon RDMA over Thunderbolt through `librdma`. Apple RDMA requires supported Thunderbolt hardware, macOS 26.2 or later, and one-time enablement from Recovery.
+
 ## What Stays Remote
 
 Remote backend buffers stay in the server process. The client holds remote pointer handles and uses them only as identifiers in later RPC messages.
@@ -118,4 +139,4 @@ stateDiagram-v2
     GraphSent --> GraphSent: new graph uid
 ```
 
-This matters for token generation. Reusing the graph avoids resending all graph metadata, but it does not remove network round trips or cross-device tensor copies.
+This matters for token generation. Reusing the graph avoids resending all graph metadata. Both graph commands are now queued asynchronously, but dependency boundaries can still force a later tensor read or event synchronization to wait for remote completion.

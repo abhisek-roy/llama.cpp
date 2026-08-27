@@ -1,6 +1,6 @@
 # Inference Execution
 
-Traceability source commit: `52e5dda62`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 ## Main Flow
 
@@ -59,13 +59,16 @@ sequenceDiagram
     Main->>Sched: compute graph
     Sched->>Sched: split graph by backend
     Sched->>RPC: compute RPC split
-    RPC->>Server: RPC_CMD_GRAPH_COMPUTE or RPC_CMD_GRAPH_RECOMPUTE
+    RPC->>RPC: enqueue RPC_CMD_GRAPH_COMPUTE or RPC_CMD_GRAPH_RECOMPUTE
+    RPC-->>Sched: enqueue complete
+    RPC->>Server: dispatcher sends queued command
     Server->>Server: reconstruct graph from rpc_tensor metadata
     Server->>Device: ggml_backend_graph_compute
     Device-->>Server: completion
     Server-->>RPC: command complete
-    RPC-->>Sched: split complete
-    Sched-->>Main: graph complete
+    Sched->>RPC: dependent read, event, or synchronize
+    RPC-->>Sched: prior remote work complete
+    Sched-->>Main: required graph results complete
 ```
 
 The remote server does not sample tokens and does not own the full llama context. It only executes the ggml graph fragment it receives.
@@ -83,8 +86,10 @@ The counts are sent, not recomputed on the server. The server only sees a partia
 
 Status at this merge: no in-tree Metal or CPU fusion rule consumes use counts yet. Current consumers are the meta-backend MoE AllReduce delay logic and OpenVINO. This is infrastructure, so expect no perf change on the dense model.
 
-## Pipeline Parallelism And RPC
+## Async Execution, Events, And Pipeline Parallelism
 
-llama.cpp has a pipeline-parallel path for layer split mode, but it requires async compute and events on all non-CPU devices. The RPC backend currently reports no async/event support. That means pipeline parallelism is effectively disabled when RPC devices participate.
+The merged RPC backend has a real per-endpoint dispatcher, asynchronous graph and tensor entry points, synchronization, and queue-backed events. It reports async and event support, so an RPC device no longer disables the scheduler's pipeline-parallel path.
 
-This is a key reason token generation can be slow over RPC. The system can place layers remotely, but it cannot overlap remote and local stages the way a lower-latency multi-GPU setup might.
+This removes the old client-side blocking limitation, but it does not remove graph dependencies. Work can overlap only when the scheduler has independent work available. In the measured placement, the local output split immediately consumes the remote split result, so it still waits near the RPC-to-CUDA boundary.
+
+The old `GGML_RPC_PIPELINE` implementation only advertised capabilities and created no-op events. It was useful as a historical experiment but is not part of the current code.

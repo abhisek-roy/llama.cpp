@@ -1,8 +1,8 @@
 # Performance Bottlenecks
 
-Traceability source commit: `52e5dda62`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
-Your current numbers, about 150 tokens/s prompt processing and 12 tokens/s token generation, are plausible for a setup where prompt processing has enough work per batch to hide some overhead, while token generation is dominated by latency, synchronization, and the slowest layer segment.
+The pre-merge measurements, about 150 tokens/s prompt processing and 12 tokens/s token generation, are plausible for a setup where prompt processing has enough work per batch to hide some overhead, while token generation is dominated by latency, synchronization, and the slowest layer segment. Re-measure these values with the merged dispatcher.
 
 The current RPC path goes over LAN through a USB-C Ethernet adapter and the router. Treat that link as part of the compute path, not only as model-load plumbing. Any layer boundary that crosses between the Linux host and the MacBook can put activation copies and synchronization on this network path.
 
@@ -18,15 +18,16 @@ flowchart LR
     TG["Token generation: one token"] --> TGCost["RPC cost paid often"]
 ```
 
-### 2. RPC Is Blocking
+### 2. RPC Dependencies Still Create Waits
 
-The RPC backend currently does not expose async tensor set/get/copy, graph plans, or events. The scheduler can fall back to blocking copies and synchronization.
+The merged RPC backend exposes asynchronous tensor set/get, asynchronous graph submission, synchronization, and real queue-backed events. The dispatcher removes the old direct blocking graph-command path and allows scheduler pipeline parallelism.
 
 Consequence:
 
-- less overlap between local and remote work
-- network latency matters more
-- pipeline parallelism is disabled when RPC participates
+- independent local and remote work can overlap
+- dependent cross-backend copies still wait for remote completion
+- token generation can remain limited by the slowest required layer segment
+- graph plans and async tensor copy are still not implemented
 
 ### 3. Cross-Backend Boundaries Move Activations
 
@@ -121,11 +122,11 @@ Likely impact: medium for prompt processing, low for single-stream token generat
 
 Prompt processing can benefit from larger batches if memory allows. Token generation for one stream is usually limited by per-token latency and the slowest distributed stage.
 
-### 8. Code-Level RPC Async And Events
+### 8. Validate Upstream Async RPC And Events
 
-Likely impact: high, but high implementation cost.
+Likely impact: workload-dependent.
 
-The RPC backend currently has no async tensor copy, no backend events, and no graph plans. Because of that, scheduler copies and graph execution can become blocking, and pipeline parallelism is disabled when RPC participates. Adding async/event support is the largest architectural performance opportunity.
+The upstream merge supplied a queued dispatcher, async tensor set/get, async graph submission, synchronization, and real events. Validate that pipeline parallelism stays enabled and compare memory pressure and PP/TG speed with the pre-merge baseline. Async tensor copy and graph plans remain possible future work, but should be justified by measurements.
 
 ### 9. Code-Level Placement Improvements
 
@@ -137,7 +138,7 @@ The current automatic split is memory-based. A better placement model would use 
 
 Likely impact: medium.
 
-RPC uses temporary buffers for graph and tensor payloads. Reducing copies and improving transfer paths can help, but it is probably less important than reducing remote layer share and adding async/event support.
+RPC uses owned temporary buffers for queued graph and tensor payloads. Reducing copies can help, but it is probably less important than reducing remote layer share and using a faster transport where available.
 
 ### 11. Remote-Side Fusion Infrastructure
 
@@ -158,9 +159,10 @@ Short-term tuning:
 
 Code-level opportunities:
 
-- async/event support for RPC backend so pipeline parallelism can work
+- measure and tune the merged async/event implementation
 - async RPC tensor copy support
 - fewer temporary copies in RPC serialization
+- validate TCP against automatically negotiated RDMA where supported
 - better remote op support query and caching
 - smarter placement that accounts for measured device speed and network cost, not only free memory
 - better graph split shaping to reduce remote boundaries

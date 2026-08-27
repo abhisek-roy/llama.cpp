@@ -1,6 +1,10 @@
 # Async RPC Outcome Report
 
-Private fork of llama.cpp. Scope: Linux host with `CUDA0` and `CUDA1`, plus MacBook M4 Pro as `RPC0` over wired 1 GbE. This report records the final state of the async investigation after telemetry runs. It replaces earlier speculative async notes that assumed RPC graph recompute blocked on the client.
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+
+Private fork of llama.cpp. Scope: Linux host with `CUDA0` and `CUDA1`, plus MacBook M4 Pro as `RPC0` over wired 1 GbE.
+
+This is a historical report from before the 2026-08-27 upstream RPC merge. Its measurements remain evidence about the topology and dependency chain, but its description of the RPC implementation is obsolete. The current backend has a queued dispatcher, asynchronous graph and tensor submission, and real events.
 
 ## 1. Current useful setup
 
@@ -22,11 +26,14 @@ The private fork should continue to track upstream llama.cpp changes. Keep the p
 - `GGML_RPC_TELEMETRY=1`: logs scheduler split timing, RPC graph client timing, RPC server graph timing, cache events, and `get_tensor` wait timing.
 - `LLAMA_RPC_SPLIT_SCALE`: scales RPC reported free memory for automatic placement. Explicit `--tensor-split` is unchanged.
 - `LLAMA_OUTPUT_LAYER_DEVICE=CUDA0`: places final norm and output head on the selected local CUDA device.
-- `GGML_RPC_PIPELINE=1`: diagnostic only. It advertises async/events and uses client-side no-op RPC events so the scheduler can enter the pipeline path. It does not make RPC operations non-blocking.
+
+Removed control:
+
+- `GGML_RPC_PIPELINE=1` was a diagnostic that advertised async/events with no-op events. Upstream real async/event support replaced it.
 
 ## 3. What telemetry proved
 
-The key measured sequence during token generation is:
+The key pre-merge measured sequence during token generation was:
 
 ```text
 rpc_telemetry: graph client backend=RPC0[192.168.0.118:50052] mode=recompute ... cmd_ms=0.001
@@ -43,13 +50,13 @@ rpc_telemetry: graph server mode=recompute device=0 backend=MTL0 nodes=1369 comp
 
 Interpretation:
 
-- `GRAPH_RECOMPUTE` is already fire-and-forget on the client. Its client `cmd_ms` is sub-millisecond.
+- The old `GRAPH_RECOMPUTE` call returned quickly. Its legacy client `cmd_ms` was sub-millisecond.
 - The MacBook Metal backend spends about 50 ms computing the RPC split.
 - The Linux client waits about 52-53 ms in the next dependent `get_tensor`.
 - The transferred tensor is only 20480 bytes, so this is not a bandwidth problem.
 - The wait is dependency and server-completion time: CUDA0 needs RPC0's output before it can run the final norm/output split.
 
-## 4. Why client-side async worker is not the next step
+## 4. What the upstream dispatcher changes
 
 For the measured topology, the split order is effectively:
 
@@ -57,9 +64,11 @@ For the measured topology, the split order is effectively:
 CUDA0 layers -> CUDA1 layers -> RPC0 layers -> CUDA0 output
 ```
 
-The CUDA0 output split needs the result from the RPC0 split. There is no independent CUDA split after RPC0 that can run while the MacBook computes. A client-side `GGML_RPC_ASYNC_WORKER=1` would make `get_tensor` return a future, but the very next split would immediately need that future's data. The wait would move from `get_tensor` to `event_wait`, `synchronize`, or a future wait. Token generation would not improve.
+The current dispatcher provides the client-side worker that this report previously considered. Graph compute, graph recompute, and async tensor operations enter one ordered queue per endpoint. Synchronize and event operations are real queue fences.
 
-`GGML_RPC_PIPELINE=1` tested a related idea by allowing the scheduler pipeline path. It did not materially improve token generation and increased compute-buffer memory pressure. Keep it off for normal use.
+The topology argument still applies: the CUDA0 output split needs the result from the RPC0 split. If no independent work is available, the wait moves to `get_tensor`, an event, or synchronization. The post-merge implementation must therefore be measured end to end rather than judged by queue submission time.
+
+Current graph-client telemetry uses `enqueue_ms`, not the legacy `cmd_ms`. Server `compute_ms`, dependent `get_tensor wait_ms`, scheduler timing, and PP/TG show whether useful overlap occurs.
 
 ## 5. What remains useful
 
@@ -80,6 +89,7 @@ This private fork has reached a practical stop point:
 - TG improved from about 8 tokens/s to about 10-12 tokens/s.
 - The setup fits the target long-context use case.
 - The current private switches are useful for operation and diagnostics.
-- Further async RPC work is deferred unless the placement or scheduler changes enough to create independent work that can overlap with RPC0.
+- The upstream async implementation is now present and requires post-merge runtime measurement.
+- Further async RPC work is deferred unless telemetry identifies a remaining avoidable serialization point.
 
 Continue taking upstream llama.cpp changes and keep these notes as the baseline for future private-fork rebases.

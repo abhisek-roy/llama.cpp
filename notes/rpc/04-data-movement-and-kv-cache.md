@@ -1,6 +1,6 @@
 # Data Movement And KV Cache
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 ## What Moves Over RPC
 
@@ -42,6 +42,10 @@ Use `ggml-rpc-server --cache` on the remote host to give the server a cache dire
 `--cache` and `GGML_RPC_CACHE_SCOPE` are separate controls. `--cache` says the server can read and write cached tensor files. `GGML_RPC_CACHE_SCOPE` says which client uploads are worth checking and saving. For the Qwen3.6 RPC investigation, use `GGML_RPC_CACHE_SCOPE=weights` with `ggml-rpc-server --cache` first: it keeps warm weight loads but avoids cache writes for transient prompt-processing tensors.
 
 On a cache miss, the client still sends `RPC_CMD_SET_TENSOR` with the tensor bytes. The server writes a cache file only when the `cache_write` flag is set, but it always calls `ggml_backend_tensor_set()` with the payload data.
+
+Both the synchronous buffer path and the backend asynchronous tensor path apply the same cache-scope decision and send the same payload layout. Because `cache_write` changes the wire format, this fork uses RPC protocol `7.0.0`; use matching fork builds on both ends.
+
+The hash lookup currently remains synchronous even when the following tensor upload is queued asynchronously. This is necessary because the client must know whether a full upload is needed. On a miss, the async path enqueues the payload and returns; queue ordering keeps it behind earlier commands.
 
 ## Boundary Copies
 

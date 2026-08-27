@@ -1,8 +1,8 @@
 # RPC Performance System Design
 
-Traceability source commit: `59abc3967`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
-This page captures the system design before more RPC performance changes. The goal is to make the moving parts visible, then break the work into small private-fork changes.
+This page captures the current RPC performance design after merging upstream's queued dispatcher and real event support. It separates current architecture from measurements made with the older direct-call implementation.
 
 ## Design Goals
 
@@ -14,9 +14,9 @@ This page captures the system design before more RPC performance changes. The go
 
 ## Current Private Fork Outcome
 
-This investigation reached a useful private-fork stop point. The setup is worth continuing to use, especially for long-context runs where the MacBook RPC device helps the model fit. Prompt processing is good enough for the target workflow, and token generation improved from about 8 tokens/s to about 10-12 tokens/s with the current placement and cache changes.
+Before the upstream merge, this investigation reached a useful private-fork stop point. The setup was worth continuing to use, especially for long-context runs where the MacBook RPC device helps the model fit. Prompt processing was good enough for the target workflow, and token generation improved from about 8 tokens/s to about 10-12 tokens/s with the tested placement and cache changes. These results now need a post-merge comparison.
 
-Current useful launch shape:
+Current post-merge validation candidate:
 
 ```text
 --rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
@@ -30,6 +30,8 @@ LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
 ```
 
 The private switches remain operational controls and diagnostics while this fork continues to take upstream llama.cpp changes. Keep them small and easy to rebase. Do not treat them as an upstream-ready feature set without a separate design pass.
+
+The private `GGML_RPC_PIPELINE` diagnostic no longer exists. Upstream now provides real asynchronous graph and tensor submission plus queue-backed events. The fork retains cache scope, telemetry, RPC split scaling, and output placement.
 
 The main performance conclusion is that `RPC0` is useful for capacity but slow as a required token-generation stage. Telemetry showed the MacBook Metal recompute takes about 50 ms, and the Linux client then waits about 52-53 ms in `get_tensor` for a tiny `norm` tensor of 20480 bytes. That wait is dependency and server-completion time, not network bandwidth.
 
@@ -138,15 +140,16 @@ flowchart TD
 
     E --> F{"split backend"}
     F -->|CUDA| G["local backend compute"]
-    F -->|RPC| H["RPC graph command"]
-    H --> I["server reconstructs graph fragment"]
-    I --> J["remote backend compute"]
-    J --> K["RPC command returns"]
+    F -->|RPC| H["enqueue RPC graph command"]
+    H --> I["dispatcher sends in queue order"]
+    I --> J["server reconstructs graph fragment"]
+    J --> K["remote backend compute"]
     G --> L["next split"]
-    K --> L
+    K --> M["dependent read or event completes"]
+    M --> L
 ```
 
-The important behavior is that split boundaries can move activations between devices. With RPC, a boundary can become a network transfer. The current RPC backend does not expose async events, so the scheduler cannot fully overlap remote and local pipeline stages.
+The important behavior is that split boundaries can move activations between devices. With RPC, a boundary can become a network transfer. The dispatcher and events allow overlap when independent work exists, but a dependent next split still waits for the remote result.
 
 ## Why Token Generation Is Harder
 
@@ -165,9 +168,9 @@ flowchart LR
 
 This is why a split can improve long prompt ingestion but still reduce interactive token generation speed. The useful split depends on whether the workload is prompt-heavy, generation-heavy, or mixed.
 
-## Telemetry Design
+## Telemetry
 
-The next design step should add timing data before changing placement logic. The telemetry should answer what each split costs and where time moves when flags change.
+Telemetry is implemented and opt-in. It answers what each split costs and where time moves when flags change.
 
 ```mermaid
 flowchart TD
@@ -178,9 +181,10 @@ flowchart TD
     E --> F{"backend is RPC?"}
     F -->|no| G["local compute time"]
     F -->|yes| H["ggml_backend_rpc_graph_compute"]
-    H --> I["send graph or recompute command"]
-    I --> J["server backend compute"]
-    J --> K["receive completion"]
+    H --> I["enqueue graph or recompute command"]
+    I --> J["dispatcher sends command"]
+    J --> K["server backend compute"]
+    K --> L["later dependency waits if needed"]
 ```
 
 Useful fields:
@@ -191,13 +195,11 @@ Useful fields:
 - copied bytes into each split
 - copy time
 - backend compute time
-- RPC command time
+- RPC graph serialization and enqueue time
 - RPC graph mode: full graph send or graph recompute
 - RPC cache event: disabled, skipped by scope, hash miss, hash hit, cache write
 
-The first telemetry version should be opt-in and log-only. It should not change scheduling behavior.
-
-`GGML_RPC_TELEMETRY=1` also keeps aggregate counters and prints `rpc_telemetry: summary ...` lines when the process exits normally. These summaries group scheduler split time by backend, RPC graph client time by backend and graph mode, RPC server compute time by backend and graph mode, and cache traffic by side, event, and usage. They are process totals, not per request totals. If the process is killed before normal shutdown, summarize the raw telemetry log with the bash commands in [Tuning experiments](06-tuning-experiments.md).
+`GGML_RPC_TELEMETRY=1` is log-only. It also keeps aggregate counters and prints `rpc_telemetry: summary ...` lines when the process exits normally. Graph-client summaries now report `enqueue_ms`, because asynchronous submission does not include transfer or remote compute time. Server `compute_ms` and a later dependent `get_tensor wait_ms` remain the authoritative indicators of the critical path. These summaries are process totals, not per-request totals. If the process is killed before normal shutdown, summarize the raw telemetry log with the bash commands in [Tuning experiments](06-tuning-experiments.md).
 
 ## Placement Scoring Design
 
@@ -244,43 +246,40 @@ Expected verification:
 
 Risk: moving output weights to `CUDA0` increases local GPU memory use. It can also add a boundary copy from the device that owns the last repeating layer to `CUDA0`; the experiment is useful only if avoiding RPC output placement is worth that cost.
 
-## Future Async And Round-Trip Work
+## Current Async And Round-Trip Model
 
 ```mermaid
 flowchart LR
-    subgraph Current["Current RPC execution"]
-        A1["send command"] --> A2["wait"]
+    subgraph Current["Queued RPC execution"]
+        A1["submit remote work"] --> A2["dispatcher queue"]
         A2 --> A3["server compute"]
-        A3 --> A4["return"]
-        A4 --> A5["next split"]
-    end
-
-    subgraph Future["Future async direction"]
-        B1["submit remote work"] --> B2["local work overlaps"]
-        B1 --> B3["remote work runs"]
-        B2 --> B4["event sync when needed"]
-        B3 --> B4
+        A1 --> A4["independent scheduler work"]
+        A3 --> A5["event or dependent read"]
+        A4 --> A5
     end
 ```
 
-Async RPC copy, compute, and events remain possible future work, but the measured topology does not justify a client-side worker next. `GRAPH_RECOMPUTE` is already fire-and-forget on the client. The token-generation wait appears in the next dependent `get_tensor`, where the CUDA0 output split needs data from the RPC0 split before it can run. A client-side worker would move that wait, not remove it, unless the scheduler has independent work to run while RPC0 computes.
+The upstream dispatcher now queues graph compute, graph recompute, and async tensor set/get operations. Synchronize and event operations are real queue fences. This is the client-side worker architecture that the earlier design treated as future work.
 
-The first private-fork async-adjacent switch is `GGML_RPC_PIPELINE`. It is disabled by default. When set to `1`, the RPC device advertises async and event support and provides client-side no-op events so the scheduler can take its pipeline-parallel `n_copies > 1` path. It does not make RPC graph compute, tensor set/get, or tensor copy non-blocking. It does not change the RPC protocol or the server. Treat it as a diagnostic for scheduler pipeline behavior and memory pressure before building a real RPC worker-thread or protocol-level async path.
+The measured topology still has a hard dependency: the CUDA0 output split needs RPC0's result. Async submission can move the wait to a later read or event, but cannot remove remote compute time. The pre-merge fake-event `GGML_RPC_PIPELINE=1` result remains historical evidence only; that switch and its no-op events were removed.
 
-In the current measurements, `GGML_RPC_PIPELINE=1` did not materially improve token generation and increased compute-buffer pressure. Keep it off for normal use unless testing scheduler behavior.
+Async tensor copy and graph plans are still absent. Consider them only after post-merge telemetry shows an avoidable serialization point with useful independent work available.
+
+## Protocol And Transport
+
+This fork uses RPC protocol `7.0.0` because `cache_write` changes the `RPC_CMD_SET_TENSOR` payload. Use matching client and server binaries.
+
+TCP remains the fallback transport. Compatible builds auto-negotiate Linux RoCE/InfiniBand or Apple silicon RDMA over Thunderbolt. Set `GGML_RPC_NO_RDMA=1` to force TCP for a controlled comparison.
 
 ## Consolidated Roadmap State
 
 ```mermaid
 flowchart TD
-    A["Capture system design in notes"] --> B["Run cache-scope experiments"]
-    B --> C["Add RPC and scheduler telemetry"]
-    C --> D["Use telemetry to tune tensor split manually"]
-    D --> E["Add RPC-aware placement scoring"]
-    E --> F["Evaluate output placement controls"]
-    C --> G["Evaluate pipeline diagnostic"]
-    G --> H["Defer async worker for this topology"]
-    H --> I["Continue with operational tuning"]
+    A["Merge upstream dispatcher and events"] --> B["Build RPC targets"]
+    B --> C["Update architecture notes"]
+    C --> D["Run post-merge telemetry"]
+    D --> E["Compare placement and transport"]
+    E --> F["Continue operational tuning"]
 ```
 
 Completed private-fork changes:
@@ -289,14 +288,19 @@ Completed private-fork changes:
 2. RPC and scheduler timing telemetry.
 3. RPC-aware placement scale for automatic placement.
 4. Output placement override.
-5. RPC pipeline diagnostic switch.
-6. `get_tensor` wait telemetry.
+5. `get_tensor` wait telemetry.
+6. Upstream queued dispatcher, async tensor operations, and real events.
+7. Linux and Apple RDMA transport support from upstream.
+
+Historical and removed:
+
+1. `GGML_RPC_PIPELINE` fake-event diagnostic. Results remain in the research notes but the code was removed.
 
 Deferred work:
 
-1. Client-side async worker. It is not expected to improve the current placement because the dependent CUDA0 output split immediately needs RPC0's result.
-2. Protocol-level async or server worker changes. These are larger private-fork divergences and are not justified by the current measurements.
-3. Further placement and memory work. This is the likely useful direction if more TG speed is needed.
+1. Async tensor copy and graph plans, pending post-merge evidence.
+2. Further placement and memory work. This remains the likely useful direction if more TG speed is needed.
+3. Transport benchmarking on hardware that can use RDMA.
 
 ## Operational Follow-Up Checks
 
@@ -318,8 +322,8 @@ Use `GGML_RPC_TELEMETRY=1` only for measurement runs. Normal runs can leave tele
 Optional diagnostics:
 
 - `GGML_RPC_CACHE_SCOPE=none`: use only if cache telemetry suggests unexpected hash or write behavior.
-- `GGML_RPC_PIPELINE=1`: use only to check scheduler pipeline behavior or memory pressure. It did not materially improve TG in this setup.
 - `LLAMA_RPC_SPLIT_SCALE`: use only when testing automatic placement without explicit `--tensor-split`.
+- `GGML_RPC_NO_RDMA=1`: force TCP when comparing it with an automatically negotiated RDMA link.
 
 For placement experiments with `LLAMA_RPC_SPLIT_SCALE`, run without explicit `--tensor-split` and compare the chosen layer placement against the manual `--tensor-split 6.5,3,6.5` baseline:
 

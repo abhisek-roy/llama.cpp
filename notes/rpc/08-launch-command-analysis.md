@@ -1,8 +1,10 @@
 # Launch Command Analysis
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 This page analyzes the Linux server command currently used for Qwen3.6 27B Q8_0 over RPC.
+
+The benchmark results on this page were collected before the 2026-08-27 upstream RPC merge. They remain useful placement evidence, but the old client used direct blocking RPC calls and an optional fake-event pipeline experiment. Re-run the best configurations with the current queued dispatcher before treating the old PP/TG numbers as current.
 
 ```sh
 /mnt/D/linux/Sources/llama.cpp/build/bin/llama-server \
@@ -512,4 +514,6 @@ With `GGML_RPC_TELEMETRY=1`, also watch `rpc_telemetry:` lines:
 - `cache`: hash hit or miss, skipped scope, and cache write intent
 - `summary`: aggregate totals printed at normal process exit
 
-For RPC specifically, pipeline parallelism should be expected to stay disabled because the RPC device reports no async compute or events. Therefore the highest-value tuning is placement: fewer RPC layers, RPC at the start of the stack, and output on local CUDA.
+For the current RPC implementation, pipeline parallelism can be enabled because the device reports async compute and real events. Placement is still likely to dominate this topology: keep fewer layers on RPC when memory permits, keep the remote segment contiguous, and prefer the output on local CUDA when the added boundary is beneficial.
+
+Current telemetry reports graph-client `enqueue_ms`; old logs on this page may show `cmd_ms`. The renamed field measures only queue submission, not remote execution. Use server `compute_ms`, dependent `get_tensor wait_ms`, scheduler split timing, and end-to-end PP/TG for comparisons.

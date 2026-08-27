@@ -1,6 +1,6 @@
 # Chapter 1: RPC Architecture
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 This chapter explains how llama.cpp RPC works when the main process uses local GPUs and one or more remote devices exposed by `ggml-rpc-server`.
 
@@ -10,8 +10,9 @@ Your current mental model:
 - Remote RPC host: MacBook with 24 GB unified memory.
 - Network path: LAN through a USB-C Ethernet adapter to the router.
 - Model: Qwen3.6 27B, 8 bit quant.
-- Observed speed after private-fork tuning: good prompt processing and about 10-12 tokens/s token generation, improved from about 8 tokens/s.
+- Pre-merge observed speed after private-fork tuning: good prompt processing and about 10-12 tokens/s token generation, improved from about 8 tokens/s. Post-merge performance has not been measured yet.
 - Current plan: keep using this private-fork setup for long-context work while continuing to take upstream llama.cpp changes.
+- Current RPC implementation: upstream queued async dispatch and real events, with the fork's cache policy, telemetry, split scaling, and output placement controls retained.
 
 Read in order:
 
@@ -26,6 +27,7 @@ Read in order:
 9. [RPC performance system design](09-performance-system-design.md)
 10. [RPC performance implementation plan](10-implementation-plan.md)
 11. [Async RPC research report](11-async-rpc-research-report.md)
+12. [Upstream RPC merge report](12-upstream-merge-report.md)
 
 Core idea:
 

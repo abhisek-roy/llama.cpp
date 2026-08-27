@@ -1,6 +1,6 @@
 # Code Map
 
-Traceability source commit: `52e5dda62`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 This page maps architecture concepts to source files.
 
@@ -26,24 +26,34 @@ This page maps architecture concepts to source files.
 
 - `ggml/include/ggml-rpc.h`
   - public RPC backend API.
-  - protocol version constants. Fork is 6.x, minor tracks upstream. 6.1 as of `52e5dda62`.
+  - protocol version constants. This fork is `7.0.0` because its `cache_write` byte changes the `RPC_CMD_SET_TENSOR` wire layout.
 
 - `ggml/src/ggml-rpc/ggml-rpc.cpp`
   - `rpc_cmd`: binary protocol commands.
   - `rpc_tensor`: serialized tensor metadata. The 4-byte padding field is now `int32_t use_count`. Wire size unchanged.
+  - `rpc_dispatcher`: one ordered command queue and worker thread per endpoint.
+  - `rpc_dispatcher::send_async()`: queues tensor or graph work without waiting for socket completion.
+  - `rpc_dispatcher::synchronize()` and event methods: queue-backed completion fences.
   - `ggml_backend_rpc_add_server()`: creates a backend registry for one RPC endpoint.
   - `ggml_backend_rpc_init()`: creates a backend instance for a remote device.
   - `ggml_backend_rpc_buffer_type()`: creates RPC buffer type for a remote device.
-  - `ggml_backend_rpc_buffer_set_tensor()`: sends tensor bytes to the server.
-  - `ggml_backend_rpc_graph_compute()`: sends graph compute or graph recompute command.
+  - `ggml_backend_rpc_buffer_set_tensor()`: synchronously sends tensor bytes through the dispatcher.
+  - `ggml_backend_rpc_set_tensor_async()` and `ggml_backend_rpc_get_tensor_async()`: queue asynchronous tensor traffic.
+  - `ggml_backend_rpc_graph_compute()`: queues graph compute or graph recompute.
   - `add_tensor()`: walks the split's tensors and packs each one's global use count from the cgraph `visited_hash_set`.
   - `rpc_server::graph_compute()`: reconstructs and executes remote graph. Restores the received use counts into the remote graph.
   - `rpc_server::graph_recompute()`: reruns stored graph.
 
 - `ggml/src/ggml-rpc/transport.cpp`
-  - `socket_t::impl::send_data()`: blocking send loop.
-  - `socket_t::impl::recv_data()`: blocking recv loop.
-  - RDMA path if built with `GGML_RPC_RDMA`.
+  - socket transport and capability negotiation.
+  - TCP fallback and Linux RoCE/InfiniBand support through `libibverbs`.
+  - `GGML_RPC_NO_RDMA`: runtime opt-out from an available RDMA transport.
+
+- `ggml/src/ggml-rpc/transport-apple.cpp`
+  - Apple silicon RDMA-over-Thunderbolt implementation through `librdma`.
+
+- `ggml/src/ggml-rpc/CMakeLists.txt`
+  - detects Linux or Apple RDMA libraries and enables `GGML_RPC_RDMA` when available.
 
 ## Device And Weight Placement
 

@@ -1,6 +1,6 @@
 # Weight Placement
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 ## Control Knobs
 
@@ -17,6 +17,13 @@ The main user-facing controls are shared with normal multi-GPU runs.
 | `--n-gpu-layers N`, `--n-gpu-layers all` | Controls how many transformer layers plus output layer can be offloaded. |
 | `--kv-offload`, `--no-kv-offload` | Controls whether KV cache follows device placement or stays local. |
 | `--override-tensor PATTERN=BUFT` | Advanced per-tensor buffer override. |
+
+Private-fork environment controls:
+
+| Variable | Meaning |
+|---|---|
+| `LLAMA_RPC_SPLIT_SCALE` | Scales reported free memory for RPC devices during automatic placement. It does not alter explicit `--tensor-split` values. |
+| `LLAMA_OUTPUT_LAYER_DEVICE` | Selects a named offload device for final norm and the output head without moving repeating layers or KV placement. |
 
 ## Device Selection
 
@@ -84,3 +91,5 @@ then:
 means roughly 20 percent to `RPC0`, 20 percent to `CUDA0`, and 60 percent to `CUDA1`.
 
 Use those values as experiments, not as fixed recommendations. The best split is the one that fits memory while reducing time spent on the slowest device and reducing expensive boundaries.
+
+The upstream async RPC merge does not change these placement rules. It can overlap queued work when dependencies allow, but it does not make a poor layer split inexpensive.

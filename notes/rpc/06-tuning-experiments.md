@@ -1,6 +1,6 @@
 # Tuning Experiments
 
-Traceability source commit: `b89f44654161`
+Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
 
 Use this page as a repeatable experiment log. Keep the model, prompt, context size, and build fixed when comparing runs.
 
@@ -163,7 +163,7 @@ Compare:
 
 - scheduler split `backend`, `copy_bytes`, `copy_ms`, and `compute_ms`
 - RPC graph `mode=full` vs `mode=recompute`
-- RPC graph client `cmd_ms`
+- RPC graph client `serialize_ms` and `enqueue_ms`
 - RPC graph server `compute_ms`
 - cache `hash_hit`, `hash_miss`, `skipped_scope`, and `cache_write`
 
@@ -202,11 +202,11 @@ grep 'rpc_telemetry: graph client ' run.log | awk '{
   k = kv["backend"] " " kv["mode"];
   calls[k]++;
   payload[k] += kv["payload_bytes"];
-  cmd[k] += kv["cmd_ms"];
+  enqueue[k] += kv["enqueue_ms"];
 }
 END {
   for (k in calls) {
-    printf "graph_client %s calls=%d payload_bytes=%d cmd_ms=%.3f avg_cmd_ms=%.3f\n", k, calls[k], payload[k], cmd[k], cmd[k]/calls[k];
+    printf "graph_client %s calls=%d payload_bytes=%d enqueue_ms=%.3f avg_enqueue_ms=%.3f\n", k, calls[k], payload[k], enqueue[k], enqueue[k]/calls[k];
   }
 }'
 ```
@@ -248,17 +248,11 @@ LLAMA_RPC_SPLIT_SCALE=0.25
 
 Use `GGML_RPC_TELEMETRY=1` and `GGML_RPC_CACHE_SCOPE=weights` during these runs. Compare the layer placement logs, PP/TG speed, and `rpc_telemetry:` split lines against the manual `--tensor-split 7,3,6` baseline.
 
-## Experiment 10: RPC Pipeline Event Prototype
+## Experiment 10: Merged Async RPC Validation
 
-Goal: test whether the scheduler pipeline path helps when RPC is present.
+Goal: validate upstream's queued RPC dispatcher and real event implementation against the pre-merge baseline.
 
-This is controlled by:
-
-```text
-GGML_RPC_PIPELINE=1
-```
-
-Default behavior is unchanged when the variable is unset or `0`. When enabled, the RPC backend advertises async and event support and provides client-side no-op events. RPC commands still block on the socket and server response. This does not implement real async RPC.
+There is no `GGML_RPC_PIPELINE` switch now. The RPC backend always reports async and event support. Graph compute, graph recompute, and backend async tensor operations are queued; events and synchronize calls wait on dispatcher fences.
 
 Start from the current fitting launch:
 
@@ -268,11 +262,11 @@ LLAMA_OUTPUT_LAYER_DEVICE=CUDA0
 --rpc 192.168.0.118:50052 --device CUDA0,CUDA1,RPC0 --tensor-split 6.5,3,6.5
 ```
 
-Compare two runs:
+Compare the merged build against the recorded pre-merge run:
 
 ```text
-GGML_RPC_PIPELINE unset
-GGML_RPC_PIPELINE=1
+pre-merge private fork with direct blocking RPC and optional fake events
+post-merge fork with upstream dispatcher and real events
 ```
 
 For measurement runs, also set:
@@ -287,9 +281,25 @@ Watch for:
 - reservation fallback: `compute buffer allocation failed, retrying without pipeline parallelism`
 - PP and TG speed
 - `rpc_telemetry: summary sched ...` by backend
+- graph-client `enqueue_ms`, not the legacy `cmd_ms`
+- dependent `get_tensor ... wait_ms`
 - changes in compute buffer memory pressure
 
-Expected result: this may show no speed gain because RPC graph compute and tensor transfers are still blocking. It is useful if it proves whether the scheduler pipeline path itself helps or only increases memory use.
+Interpretation: low enqueue time only proves that work entered the dispatcher quickly. Compare server `compute_ms`, the next dependent read or event wait, and end-to-end PP/TG. A speedup requires useful independent work to overlap with the remote stage.
+
+## Experiment 11: TCP Versus RDMA
+
+Goal: measure whether the negotiated transport changes load time, boundary-copy time, or PP/TG.
+
+RDMA is selected automatically when both peers support it. Confirm the startup logs, then repeat the same workload with TCP forced on both peers:
+
+```text
+GGML_RPC_NO_RDMA=1
+```
+
+Linux uses RoCE/InfiniBand through `libibverbs`. Supported Apple silicon systems can use RDMA over Thunderbolt through `librdma`; this requires macOS 26.2 or later and one-time `rdma_ctl enable` from Recovery. Connect using the address on the RDMA-capable link.
+
+Keep model, context, device order, tensor split, cache warmth, and prompt fixed. Record the negotiated transport and compare model-load time, scheduler copy telemetry, PP, and TG.
 
 ## Experiment Log Template
 
