@@ -1,6 +1,6 @@
 # Data Movement And KV Cache
 
-Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+Reviewed against upstream `9723942ad` and the private-fork merge resolution of 2026-08-31.
 
 ## What Moves Over RPC
 
@@ -46,6 +46,12 @@ On a cache miss, the client still sends `RPC_CMD_SET_TENSOR` with the tensor byt
 Both the synchronous buffer path and the backend asynchronous tensor path apply the same cache-scope decision and send the same payload layout. Because `cache_write` changes the wire format, this fork uses RPC protocol `7.0.0`; use matching fork builds on both ends.
 
 The hash lookup currently remains synchronous even when the following tensor upload is queued asynchronously. This is necessary because the client must know whether a full upload is needed. On a miss, the async path enqueues the payload and returns; queue ordering keeps it behind earlier commands.
+
+## Allocation Size Handling
+
+Some operations can require an output allocation larger than `ggml_nbytes()`. `ggml_backend_op_alloc_size_may_expand()` identifies these operations so backend allocation checks do not assume that the logical tensor size is always the maximum allocation size.
+
+The RPC backend uses this classification when deciding whether it must query the remote buffer allocation size. This keeps RPC allocation validation consistent with local backends for operations whose storage can expand.
 
 ## Boundary Copies
 

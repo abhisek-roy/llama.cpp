@@ -1,6 +1,6 @@
 # Inference Execution
 
-Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+Reviewed against upstream `9723942ad` and the private-fork merge resolution of 2026-08-31.
 
 ## Main Flow
 
@@ -72,6 +72,12 @@ sequenceDiagram
 ```
 
 The remote server does not sample tokens and does not own the full llama context. It only executes the ggml graph fragment it receives.
+
+### Endpoint-Aware Tensor Serialization
+
+`serialize_graph()` passes the destination endpoint's `rpc_dispatcher` through `add_tensor()` to `serialize_tensor()`. RPC buffer handles are emitted only when the tensor buffer belongs to that dispatcher. Handles owned by another RPC server are cleared because remote pointers are meaningful only in the process that allocated them.
+
+This matters when one graph uses two or more RPC endpoints. It prevents one server from interpreting another server's buffer handle as its own. Tensor use counts and the fork's graph telemetry are still collected for every serialized graph.
 
 ### Tensor Use Counts In The Serialized Graph
 

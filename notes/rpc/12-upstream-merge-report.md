@@ -1,10 +1,25 @@
 # Upstream RPC Merge Report
 
-Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+Reviewed against upstream `9723942ad` and the private-fork merge resolution of 2026-08-31.
 
 ## Outcome
 
 The upstream RPC changes are beneficial to this fork and have been integrated locally. The merged RPC targets build successfully. Runtime validation with a matched client and server is still required before the merge is finalized.
+
+The 2026-08-31 follow-up merge is resolved and staged but still awaits its merge commit. The RPC build completed successfully after conflict resolution.
+
+## 2026-08-31 Follow-Up
+
+Upstream added endpoint-aware graph serialization in `a7cc83bba`. A remote buffer handle is now included only when its dispatcher matches the RPC endpoint receiving the graph. Handles from other servers are cleared, which prevents invalid cross-server pointer use. Upstream also added a two-server regression test.
+
+Upstream added `ggml_backend_op_alloc_size_may_expand()` in `73f56d105`. RPC uses it when deciding whether to query a remote allocation size for an operation whose output storage can exceed `ggml_nbytes()`.
+
+The merge conflicts were limited to:
+
+- the `ggml-backend.cpp` include block, where the fork still needs `<mutex>` and `<string>` for telemetry;
+- the `ggml-rpc.cpp` graph serialization signature and call, where upstream added the destination dispatcher while the fork added tensor-count and timing telemetry.
+
+The resolution retains both upstream endpoint filtering and the fork's telemetry.
 
 ## Adopted From Upstream
 

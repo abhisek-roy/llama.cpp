@@ -1,6 +1,6 @@
 # RPC Backend Flow
 
-Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+Reviewed against upstream `9723942ad` and the private-fork merge resolution of 2026-08-31.
 
 ## What RPC Is
 
@@ -125,6 +125,12 @@ flowchart LR
 ```
 
 The client serializes tensor metadata. The server reconstructs temporary ggml tensors around remote buffers and executes backend operations locally.
+
+### Remote Pointer Ownership
+
+A remote buffer pointer is valid only on the RPC server that allocated it. When the client serializes a graph for an endpoint, it includes a remote pointer only if the buffer's dispatcher matches that endpoint. A tensor backed by another RPC server is serialized with null buffer and data pointers instead.
+
+This prevents a multi-server graph from sending a pointer allocated by server A to server B. Upstream includes a two-server regression test for this case. The change affects client-side graph serialization and does not change this fork's `7.0.0` wire layout.
 
 ## Graph Reuse
 

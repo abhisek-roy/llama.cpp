@@ -1,6 +1,6 @@
 # Code Map
 
-Reviewed against upstream `192067b72` and the private-fork merge resolution of 2026-08-27.
+Reviewed against upstream `9723942ad` and the private-fork merge resolution of 2026-08-31.
 
 This page maps architecture concepts to source files.
 
@@ -40,7 +40,9 @@ This page maps architecture concepts to source files.
   - `ggml_backend_rpc_buffer_set_tensor()`: synchronously sends tensor bytes through the dispatcher.
   - `ggml_backend_rpc_set_tensor_async()` and `ggml_backend_rpc_get_tensor_async()`: queue asynchronous tensor traffic.
   - `ggml_backend_rpc_graph_compute()`: queues graph compute or graph recompute.
-  - `add_tensor()`: walks the split's tensors and packs each one's global use count from the cgraph `visited_hash_set`.
+  - `serialize_tensor()`: serializes a remote buffer handle only when its dispatcher owns the destination endpoint.
+  - `add_tensor()`: walks the split's tensors, passes the destination dispatcher to serialization, and packs each tensor's global use count from the cgraph `visited_hash_set`.
+  - `serialize_graph()`: serializes a graph for one RPC endpoint and retains the fork's tensor-count telemetry.
   - `rpc_server::graph_compute()`: reconstructs and executes remote graph. Restores the received use counts into the remote graph.
   - `rpc_server::graph_recompute()`: reruns stored graph.
 
@@ -93,6 +95,7 @@ This page maps architecture concepts to source files.
   - `ggml_backend_sched_split_graph()`: assigns nodes to backends and creates backend splits.
   - `ggml_backend_sched_compute_splits()`: copies split inputs and computes each split.
   - `ggml_backend_sched_backend_id_from_cur()`: uses existing buffers and weight ownership to choose a backend.
+  - `ggml_backend_op_alloc_size_may_expand()`: identifies operations whose backend allocation can exceed the logical tensor size.
 
 - `ggml/src/ggml.c`
   - `ggml_visit_parents_graph()`: builds the cgraph `visited_hash_set` and `use_counts` at graph build time.
